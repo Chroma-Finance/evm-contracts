@@ -15,6 +15,7 @@
 # lib/ is tracked via .gitmodules — do not ignore it entirely.
 # Ignore any accidental npm installs inside lib packages.
 lib/**/node_modules/
+lib/
 
 # ─── Coverage & gas reports ───────────────────────────────────────────────────
 lcov.info
