@@ -214,12 +214,13 @@ contract PortfolioVault is ReentrancyGuard {
 
     /**
      * @notice Deposit `assets_` of the denomination token and receive vault shares.
-     * @dev Accrues the management fee before processing to keep share price accurate.
+     * @dev ERC-4626 compliant. Enforces receiver == msg.sender for self-custody safety.
      *      TODO: After receiving denomination asset, swap into target portfolio allocation.
      */
     function deposit(uint256 assets_, address receiver) public nonReentrant returns (uint256 shares) {
         if (assets_ == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
+        if (receiver != msg.sender) revert Unauthorized();
         if (assets_ > maxDeposit(receiver)) revert ExceedsMax();
 
         _accrueManagementFee();
@@ -248,7 +249,8 @@ contract PortfolioVault is ReentrancyGuard {
 
     /**
      * @notice Withdraw `assets_` of the denomination token by burning the required shares.
-     * @dev Guardian approval required when {guardianModule} is set (unless within daily limit).
+     * @dev ERC-4626 compliant. Enforces receiver == owner == msg.sender for self-custody safety.
+     *      Guardian approval required when {guardianModule} is set.
      *      Performance fee is charged on profit above the high-water mark.
      *      TODO: Before transfer, swap portfolio tokens back to denomination asset.
      */
@@ -259,6 +261,8 @@ contract PortfolioVault is ReentrancyGuard {
     ) public nonReentrant returns (uint256 shares) {
         if (assets_ == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
+        if (receiver != msg.sender) revert Unauthorized();
+        if (owner_ != msg.sender) revert Unauthorized();
         if (assets_ > maxWithdraw(owner_)) revert ExceedsMax();
 
         _accrueManagementFee();
@@ -302,6 +306,29 @@ contract PortfolioVault is ReentrancyGuard {
         assets_ = previewRedeem(shares_);
         uint256 fee = _chargePerformanceFee(assets_);
         _executeWithdraw(msg.sender, receiver, owner_, assets_ - fee, shares_);
+    }
+
+    /**
+     * @notice Convenience function to exit the vault entirely, burning all caller shares.
+     * @dev Applies the same guardian gate and performance fee as a normal withdrawal.
+     *      TODO: Before transfer, swap portfolio tokens back to denomination asset.
+     */
+    function withdrawAll() external nonReentrant returns (uint256 assets_) {
+        uint256 shares = _balances[msg.sender];
+        if (shares == 0) revert ZeroAmount();
+
+        _accrueManagementFee();
+
+        if (guardianModule != address(0)) {
+            (bool approved,) = IGuardian(guardianModule).executeWithdrawal(address(this));
+            if (!approved) revert GuardianApprovalRequired();
+        }
+
+        // TODO: Call SwapRouter to liquidate portfolio tokens into denomination asset.
+
+        assets_ = previewRedeem(shares);
+        uint256 fee = _chargePerformanceFee(assets_);
+        _executeWithdraw(msg.sender, msg.sender, msg.sender, assets_ - fee, shares);
     }
 
     // ─── Fee logic ───────────────────────────────────────────────────────────
