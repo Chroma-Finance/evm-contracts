@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IGuardian} from "../interfaces/IGuardian.sol";
+import {IEventNotifier} from "../interfaces/IEventNotifier.sol";
 
 /**
  * @title PortfolioVault
@@ -54,6 +55,7 @@ contract PortfolioVault is ReentrancyGuard {
     address public vaultOwner;
     address public guardianModule;
     address public recoveryModule;
+    address public eventNotifier;
 
     /// @notice Target allocation of the portfolio. Actual holdings diverge until swaps are wired in.
     Asset[] public portfolio;
@@ -94,8 +96,7 @@ contract PortfolioVault is ReentrancyGuard {
         uint256 shares
     );
 
-    // Vault-specific
-    event FeesAccrued(uint256 managementFeeShares, uint256 performanceFeeAssets);
+    // Vault-specific (security events remain here; financial events route through EventNotifier)
     event GuardianModuleSet(address indexed guardian);
     event RecoveryModuleSet(address indexed recovery);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
@@ -122,18 +123,20 @@ contract PortfolioVault is ReentrancyGuard {
 
     /**
      * @notice Initialises the vault. Called once by VaultFactory immediately after cloning.
-     * @param owner_        Vault owner.
-     * @param tier_         Risk tier (0 = Low, 1 = Medium, 2 = High).
-     * @param asset_        Denomination asset for ERC-4626 accounting.
-     * @param feeRecipient_ Address that receives management fee shares and performance fees.
-     * @param tokens_       Portfolio token addresses (must match weights_).
-     * @param weights_      Allocation weights in basis points; must sum to 10 000.
+     * @param owner_          Vault owner.
+     * @param tier_           Risk tier (0 = Low, 1 = Medium, 2 = High).
+     * @param asset_          Denomination asset for ERC-4626 accounting.
+     * @param feeRecipient_   Address that receives management fee shares and performance fees.
+     * @param eventNotifier_  EventNotifier contract for centralized financial event emission.
+     * @param tokens_         Portfolio token addresses (must match weights_).
+     * @param weights_        Allocation weights in basis points; must sum to 10 000.
      */
     function initialize(
         address owner_,
         uint8 tier_,
         address asset_,
         address feeRecipient_,
+        address eventNotifier_,
         address[] calldata tokens_,
         uint256[] calldata weights_
     ) external {
@@ -147,6 +150,7 @@ contract PortfolioVault is ReentrancyGuard {
         riskTier = tier_;
         _asset = asset_;
         feeRecipient = feeRecipient_;
+        eventNotifier = eventNotifier_;
         lastFeeAccrual = block.timestamp;
         highWaterMark = 1e18; // initial share price = 1.0
 
@@ -354,7 +358,9 @@ contract PortfolioVault is ReentrancyGuard {
 
         if (feeShares > 0) {
             _mint(feeRecipient, feeShares);
-            emit FeesAccrued(feeShares, 0);
+            if (eventNotifier != address(0)) {
+                IEventNotifier(eventNotifier).emitManagementFee(address(this), riskTier, feeShares, totalAssets());
+            }
         }
     }
 
@@ -377,7 +383,9 @@ contract PortfolioVault is ReentrancyGuard {
         if (fee > 0) {
             IERC20(_asset).safeTransfer(feeRecipient, fee);
             highWaterMark = currentSharePrice;
-            emit FeesAccrued(0, fee);
+            if (eventNotifier != address(0)) {
+                IEventNotifier(eventNotifier).emitPerformanceFee(address(this), riskTier, msg.sender, fee, totalAssets());
+            }
         }
     }
 
@@ -461,6 +469,9 @@ contract PortfolioVault is ReentrancyGuard {
         IERC20(_asset).safeTransferFrom(caller, address(this), assets_);
         _mint(receiver, shares);
         emit Deposit(caller, receiver, assets_, shares);
+        if (eventNotifier != address(0)) {
+            IEventNotifier(eventNotifier).emitDeposit(caller, address(this), riskTier, assets_, shares, totalAssets());
+        }
     }
 
     function _executeWithdraw(
@@ -476,6 +487,9 @@ contract PortfolioVault is ReentrancyGuard {
         _burn(owner_, shares);
         IERC20(_asset).safeTransfer(receiver, assets_);
         emit Withdraw(caller, receiver, owner_, assets_, shares);
+        if (eventNotifier != address(0)) {
+            IEventNotifier(eventNotifier).emitWithdrawal(caller, address(this), riskTier, assets_, shares, totalAssets());
+        }
     }
 
     function _mint(address to, uint256 amount) internal {

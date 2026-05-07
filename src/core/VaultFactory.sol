@@ -4,6 +4,7 @@ pragma solidity 0.8.20;
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {PortfolioVault} from "./PortfolioVault.sol";
+import {EventNotifier} from "./EventNotifier.sol";
 import {RiskTierRegistry} from "../utils/RiskTierRegistry.sol";
 
 /**
@@ -31,6 +32,9 @@ contract VaultFactory is Ownable {
     /// @notice Address that receives protocol fees from all vaults.
     address public feeRecipient;
 
+    /// @notice Centralized event emitter for all financial events.
+    address public eventNotifier;
+
     /// @notice User vaults by tier: user => tier => vault.
     mapping(address => mapping(uint8 => address)) public userVaults;
 
@@ -42,7 +46,7 @@ contract VaultFactory is Ownable {
 
     // ─── Events ──────────────────────────────────────────────────────────────
 
-    event VaultCreated(address indexed user, uint8 indexed tier, address indexed vault);
+    // VaultCreated is emitted by EventNotifier (centralized financial event tracking).
     event ImplementationUpgraded(address indexed oldImpl, address indexed newImpl);
     event FeeRecipientUpdated(address indexed newRecipient);
     event DenominationAssetUpdated(address indexed newAsset);
@@ -72,6 +76,11 @@ contract VaultFactory is Ownable {
         riskRegistry = riskRegistry_;
         feeRecipient = feeRecipient_;
         vaultImplementation = address(new PortfolioVault());
+
+        EventNotifier notifier = new EventNotifier(address(this));
+        eventNotifier = address(notifier);
+        // Factory must be authorized to call emitVaultCreated.
+        notifier.authorize(address(this));
     }
 
     // ─── External ────────────────────────────────────────────────────────────
@@ -97,9 +106,13 @@ contract VaultFactory is Ownable {
             riskTier_,
             denominationAsset,
             feeRecipient,
+            eventNotifier,
             tokens,
             weights
         );
+
+        // Authorize vault to emit financial events through EventNotifier.
+        EventNotifier(eventNotifier).authorize(vault);
 
         userVaults[msg.sender][riskTier_] = vault;
         allVaults.push(vault);
@@ -108,7 +121,7 @@ contract VaultFactory is Ownable {
         // TODO: If enableBoost, register vault with YieldOptimizer.
         (enableBoost); // suppress unused-param warning until YieldOptimizer is wired
 
-        emit VaultCreated(msg.sender, riskTier_, vault);
+        EventNotifier(eventNotifier).emitVaultCreated(msg.sender, vault, riskTier_);
     }
 
     // ─── Admin ───────────────────────────────────────────────────────────────
