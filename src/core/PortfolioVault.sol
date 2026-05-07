@@ -2,9 +2,11 @@
 pragma solidity 0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AggregatorV3Interface} from "@chainlink/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IGuardian} from "../interfaces/IGuardian.sol";
 import {IEventNotifier} from "../interfaces/IEventNotifier.sol";
 
@@ -57,6 +59,9 @@ contract PortfolioVault is ReentrancyGuard {
     address public recoveryModule;
     address public eventNotifier;
 
+    /// @notice Chainlink price feed per portfolio token (and optionally the denomination asset).
+    mapping(address => address) public priceFeeds;
+
     /// @notice Target allocation of the portfolio. Actual holdings diverge until swaps are wired in.
     Asset[] public portfolio;
 
@@ -66,6 +71,11 @@ contract PortfolioVault is ReentrancyGuard {
     uint256 public constant PERFORMANCE_FEE_BPS = 2_000; // 20% of profit above HWM
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant SECONDS_PER_YEAR = 365 days;
+
+    /// @notice Decimal precision used for all USD oracle values (matches Chainlink standard).
+    uint8 public constant PRICE_DECIMALS = 8;
+    /// @notice Maximum age of an accepted Chainlink price round.
+    uint256 public constant PRICE_STALENESS_THRESHOLD = 1 hours;
 
     address public feeRecipient;
 
@@ -111,6 +121,9 @@ contract PortfolioVault is ReentrancyGuard {
     error ExceedsMax();
     error GuardianApprovalRequired();
     error InsufficientAllowance();
+    error NoPriceFeed(address token);
+    error InvalidPrice(address token);
+    error StalePriceFeed(address token);
 
     // ─── Modifiers ───────────────────────────────────────────────────────────
 
@@ -128,8 +141,9 @@ contract PortfolioVault is ReentrancyGuard {
      * @param asset_          Denomination asset for ERC-4626 accounting.
      * @param feeRecipient_   Address that receives management fee shares and performance fees.
      * @param eventNotifier_  EventNotifier contract for centralized financial event emission.
-     * @param tokens_         Portfolio token addresses (must match weights_).
+     * @param tokens_         Portfolio token addresses (must match weights_ and priceFeeds_).
      * @param weights_        Allocation weights in basis points; must sum to 10 000.
+     * @param priceFeeds_     Chainlink price feed per portfolio token (address(0) = no feed).
      */
     function initialize(
         address owner_,
@@ -138,11 +152,13 @@ contract PortfolioVault is ReentrancyGuard {
         address feeRecipient_,
         address eventNotifier_,
         address[] calldata tokens_,
-        uint256[] calldata weights_
+        uint256[] calldata weights_,
+        address[] calldata priceFeeds_
     ) external {
         if (_initialized) revert AlreadyInitialized();
         if (owner_ == address(0) || asset_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
         if (tokens_.length == 0 || tokens_.length != weights_.length) revert InvalidWeights();
+        if (tokens_.length != priceFeeds_.length) revert InvalidWeights();
         _assertWeightsSum(weights_);
 
         _initialized = true;
@@ -160,6 +176,9 @@ contract PortfolioVault is ReentrancyGuard {
 
         for (uint256 i = 0; i < tokens_.length; i++) {
             portfolio.push(Asset({token: tokens_[i], targetWeight: weights_[i]}));
+            if (priceFeeds_[i] != address(0)) {
+                priceFeeds[tokens_[i]] = priceFeeds_[i];
+            }
         }
     }
 
@@ -170,15 +189,72 @@ contract PortfolioVault is ReentrancyGuard {
         return _asset;
     }
 
-    /**
-     * @notice Returns total vault value denominated in the {asset} token.
-     * @dev TODO: Replace with Chainlink oracle pricing across all portfolio tokens.
-     *      Currently returns only the raw denomination-asset balance, which is accurate
-     *      only before swap integration is wired in.
-     */
+    /// @notice Returns denomination-asset balance (USDC). Used for ERC-4626 share math.
     function totalAssets() public view returns (uint256) {
-        // TODO: sum(portfolioToken[i].balance * chainlinkPrice[i]) for all portfolio assets.
         return IERC20(_asset).balanceOf(address(this));
+    }
+
+    /**
+     * @notice Returns total vault value in USD with {PRICE_DECIMALS} (8) decimals.
+     * @dev Iterates portfolio holdings, pricing each via Chainlink. Tokens with zero
+     *      balance or no registered feed are skipped. The denomination asset (USDC) is
+     *      included at $1 per unit when no feed is registered for it, normalised from its
+     *      native decimals to 8 decimals.
+     *
+     *      Used by EventNotifier for TVL tracking and analytics; NOT used for share math.
+     */
+    function totalAssetsUSD() public view returns (uint256 totalValue) {
+        // Price all held portfolio tokens via oracle.
+        for (uint256 i = 0; i < portfolio.length; i++) {
+            address token = portfolio[i].token;
+            if (token.code.length == 0) continue; // guard against non-contract token addresses
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance == 0) continue;
+
+            address feed = priceFeeds[token];
+            if (feed == address(0)) continue; // no feed registered — skip
+
+            uint256 price = getTokenPrice(token);
+            uint8 tokenDec = IERC20Metadata(token).decimals();
+            totalValue += (balance * price) / (10 ** tokenDec);
+        }
+
+        // Include denomination asset (USDC).
+        uint256 denomBalance = IERC20(_asset).balanceOf(address(this));
+        if (denomBalance > 0) {
+            uint8 denomDec = IERC20Metadata(_asset).decimals();
+            address denomFeed = priceFeeds[_asset];
+            if (denomFeed != address(0)) {
+                totalValue += (denomBalance * getTokenPrice(_asset)) / (10 ** denomDec);
+            } else {
+                // Stablecoin fallback: treat 1 denomination unit as exactly $1.
+                totalValue += _scaleDecimals(denomBalance, denomDec, PRICE_DECIMALS);
+            }
+        }
+    }
+
+    /**
+     * @notice Fetches and validates the latest USD price from a Chainlink feed.
+     * @param token Portfolio token whose registered feed is queried.
+     * @return price USD price with {PRICE_DECIMALS} (8) decimals.
+     */
+    function getTokenPrice(address token) public view returns (uint256 price) {
+        address feed = priceFeeds[token];
+        if (feed == address(0)) revert NoPriceFeed(token);
+
+        (
+            uint80 roundId,
+            int256 answer,
+            ,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        ) = AggregatorV3Interface(feed).latestRoundData();
+
+        if (answer <= 0)                                      revert InvalidPrice(token);
+        if (updatedAt == 0 || answeredInRound < roundId)     revert StalePriceFeed(token);
+        if (block.timestamp - updatedAt > PRICE_STALENESS_THRESHOLD) revert StalePriceFeed(token);
+
+        price = uint256(answer);
     }
 
     function convertToShares(uint256 assets_) public view returns (uint256) {
@@ -359,7 +435,7 @@ contract PortfolioVault is ReentrancyGuard {
         if (feeShares > 0) {
             _mint(feeRecipient, feeShares);
             if (eventNotifier != address(0)) {
-                IEventNotifier(eventNotifier).emitManagementFee(address(this), riskTier, feeShares, totalAssets());
+                IEventNotifier(eventNotifier).emitManagementFee(address(this), riskTier, feeShares, totalAssetsUSD());
             }
         }
     }
@@ -384,7 +460,7 @@ contract PortfolioVault is ReentrancyGuard {
             IERC20(_asset).safeTransfer(feeRecipient, fee);
             highWaterMark = currentSharePrice;
             if (eventNotifier != address(0)) {
-                IEventNotifier(eventNotifier).emitPerformanceFee(address(this), riskTier, msg.sender, fee, totalAssets());
+                IEventNotifier(eventNotifier).emitPerformanceFee(address(this), riskTier, msg.sender, fee, totalAssetsUSD());
             }
         }
     }
@@ -470,7 +546,7 @@ contract PortfolioVault is ReentrancyGuard {
         _mint(receiver, shares);
         emit Deposit(caller, receiver, assets_, shares);
         if (eventNotifier != address(0)) {
-            IEventNotifier(eventNotifier).emitDeposit(caller, address(this), riskTier, assets_, shares, totalAssets());
+            IEventNotifier(eventNotifier).emitDeposit(caller, address(this), riskTier, assets_, shares, totalAssetsUSD());
         }
     }
 
@@ -488,7 +564,7 @@ contract PortfolioVault is ReentrancyGuard {
         IERC20(_asset).safeTransfer(receiver, assets_);
         emit Withdraw(caller, receiver, owner_, assets_, shares);
         if (eventNotifier != address(0)) {
-            IEventNotifier(eventNotifier).emitWithdrawal(caller, address(this), riskTier, assets_, shares, totalAssets());
+            IEventNotifier(eventNotifier).emitWithdrawal(caller, address(this), riskTier, assets_, shares, totalAssetsUSD());
         }
     }
 
@@ -520,6 +596,11 @@ contract PortfolioVault is ReentrancyGuard {
         if (current == type(uint256).max) return;
         if (current < amount) revert InsufficientAllowance();
         _allowances[owner_][spender] = current - amount;
+    }
+
+    function _scaleDecimals(uint256 amount, uint8 fromDec, uint8 toDec) internal pure returns (uint256) {
+        if (toDec >= fromDec) return amount * (10 ** (toDec - fromDec));
+        return amount / (10 ** (fromDec - toDec));
     }
 
     function _assertWeightsSum(uint256[] calldata weights_) internal pure {

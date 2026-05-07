@@ -234,8 +234,9 @@ contract EventNotifierTest is Test {
 
         uint256 expectedShares = PortfolioVault(vault).previewDeposit(amount);
 
+        // vaultTotalAssets = totalAssetsUSD(): USDC balance scaled from 6 dec to 8 dec ($1 fallback).
         vm.expectEmit(true, true, true, true, address(notifier));
-        emit Deposited(userA, vault, 0, amount, expectedShares, amount, block.timestamp);
+        emit Deposited(userA, vault, 0, amount, expectedShares, amount * 100, block.timestamp);
 
         PortfolioVault(vault).deposit(amount, userA);
         vm.stopPrank();
@@ -254,7 +255,7 @@ contract EventNotifierTest is Test {
         uint256 expectedShares = PortfolioVault(vault1).previewDeposit(amount);
 
         vm.expectEmit(true, true, true, true, address(notifier));
-        emit Deposited(userA, vault1, 1, amount, expectedShares, amount, block.timestamp);
+        emit Deposited(userA, vault1, 1, amount, expectedShares, amount * 100, block.timestamp);
 
         PortfolioVault(vault1).deposit(amount, userA);
         vm.stopPrank();

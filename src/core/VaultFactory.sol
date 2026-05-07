@@ -96,7 +96,7 @@ contract VaultFactory is Ownable {
         if (userVaults[msg.sender][riskTier_] != address(0)) revert TierVaultExists();
 
         // Retrieve allocation from the registry (reverts if tier inactive or not found).
-        (address[] memory tokens, uint256[] memory weights,) =
+        (address[] memory tokens, uint256[] memory weights, address[] memory feeds) =
             RiskTierRegistry(riskRegistry).getTier(riskTier_);
 
         vault = vaultImplementation.clone();
@@ -108,7 +108,8 @@ contract VaultFactory is Ownable {
             feeRecipient,
             eventNotifier,
             tokens,
-            weights
+            weights,
+            feeds
         );
 
         // Authorize vault to emit financial events through EventNotifier.
