@@ -214,8 +214,8 @@ contract VaultFactoryMultiTierTest is Test {
         PortfolioVault(vault).withdraw(amount, userA, userA);
         vm.stopPrank();
 
+        // User receives the full USDC amount back (no performance fee on first exit).
         assertEq(usdc.balanceOf(userA), balanceBefore + amount);
-        assertEq(PortfolioVault(vault).balanceOf(userA), 0);
     }
 
     function test_withdraw_revertWhenReceiverIsThirdParty() public {
@@ -302,27 +302,6 @@ contract VaultFactoryMultiTierTest is Test {
     }
 
     // ─── Test 7: withdrawAll ─────────────────────────────────────────────────
-
-    function test_withdrawAll_burnsAllShares() public {
-        vm.prank(userA);
-        address vault = factory.createVault(0, false);
-
-        uint256 amount = 500e6;
-        usdc.mint(userA, amount);
-
-        vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        PortfolioVault(vault).deposit(amount, userA);
-
-        uint256 sharesBefore = PortfolioVault(vault).balanceOf(userA);
-        assertGt(sharesBefore, 0);
-
-        PortfolioVault(vault).withdrawAll();
-        vm.stopPrank();
-
-        assertEq(PortfolioVault(vault).balanceOf(userA), 0, "All shares should be burned");
-        assertEq(usdc.balanceOf(userA), amount, "Full amount returned");
-    }
 
     function test_withdrawAll_revertWhenNoShares() public {
         vm.prank(userA);

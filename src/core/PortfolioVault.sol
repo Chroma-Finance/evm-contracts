@@ -25,8 +25,8 @@ import {IEventNotifier} from "../interfaces/IEventNotifier.sol";
  *         Swap integration (TODO): deposits swap the denomination asset into the portfolio
  *         allocation; withdrawals swap back. Both are no-ops in this v0.1 draft.
  *
- *         Oracle integration (TODO): totalAssets() must be upgraded with Chainlink price
- *         feeds before fees and share conversions reflect true portfolio value.
+ *         totalAssets() returns portfolio USD value via Chainlink feeds so share prices
+ *         reflect true portfolio value rather than denomination-asset balance.
  */
 contract PortfolioVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -168,7 +168,7 @@ contract PortfolioVault is ReentrancyGuard {
         feeRecipient = feeRecipient_;
         eventNotifier = eventNotifier_;
         lastFeeAccrual = block.timestamp;
-        highWaterMark = 1e18; // initial share price = 1.0
+        highWaterMark = 0; // set on first withdrawal once USD share price is known
 
         string memory tierLabel = tier_ == 0 ? "Low" : tier_ == 1 ? "Medium" : "High";
         _name   = string.concat("Chroma ", tierLabel, " Risk Vault");
@@ -189,48 +189,10 @@ contract PortfolioVault is ReentrancyGuard {
         return _asset;
     }
 
-    /// @notice Returns denomination-asset balance (USDC). Used for ERC-4626 share math.
+    /// @notice Returns total portfolio value in USD with {PRICE_DECIMALS} (8) decimals.
+    /// @dev Used for ERC-4626 share math so shares are priced in USD, not denomination-asset units.
     function totalAssets() public view returns (uint256) {
-        return IERC20(_asset).balanceOf(address(this));
-    }
-
-    /**
-     * @notice Returns total vault value in USD with {PRICE_DECIMALS} (8) decimals.
-     * @dev Iterates portfolio holdings, pricing each via Chainlink. Tokens with zero
-     *      balance or no registered feed are skipped. The denomination asset (USDC) is
-     *      included at $1 per unit when no feed is registered for it, normalised from its
-     *      native decimals to 8 decimals.
-     *
-     *      Used by EventNotifier for TVL tracking and analytics; NOT used for share math.
-     */
-    function totalAssetsUSD() public view returns (uint256 totalValue) {
-        // Price all held portfolio tokens via oracle.
-        for (uint256 i = 0; i < portfolio.length; i++) {
-            address token = portfolio[i].token;
-            if (token.code.length == 0) continue; // guard against non-contract token addresses
-            uint256 balance = IERC20(token).balanceOf(address(this));
-            if (balance == 0) continue;
-
-            address feed = priceFeeds[token];
-            if (feed == address(0)) continue; // no feed registered — skip
-
-            uint256 price = getTokenPrice(token);
-            uint8 tokenDec = IERC20Metadata(token).decimals();
-            totalValue += (balance * price) / (10 ** tokenDec);
-        }
-
-        // Include denomination asset (USDC).
-        uint256 denomBalance = IERC20(_asset).balanceOf(address(this));
-        if (denomBalance > 0) {
-            uint8 denomDec = IERC20Metadata(_asset).decimals();
-            address denomFeed = priceFeeds[_asset];
-            if (denomFeed != address(0)) {
-                totalValue += (denomBalance * getTokenPrice(_asset)) / (10 ** denomDec);
-            } else {
-                // Stablecoin fallback: treat 1 denomination unit as exactly $1.
-                totalValue += _scaleDecimals(denomBalance, denomDec, PRICE_DECIMALS);
-            }
-        }
+        return _calculatePortfolioValue();
     }
 
     /**
@@ -435,14 +397,13 @@ contract PortfolioVault is ReentrancyGuard {
         if (feeShares > 0) {
             _mint(feeRecipient, feeShares);
             if (eventNotifier != address(0)) {
-                IEventNotifier(eventNotifier).emitManagementFee(address(this), riskTier, feeShares, totalAssetsUSD());
+                IEventNotifier(eventNotifier).emitManagementFee(address(this), riskTier, feeShares, totalAssets());
             }
         }
     }
 
     /**
      * @notice Charges the performance fee on profit above the high-water mark.
-     * @dev Only meaningful after oracle integration; returns 0 while totalAssets() is stub-only.
      * @param withdrawAssets Gross withdrawal amount before fee deduction.
      * @return fee           Performance fee amount in denomination asset.
      */
@@ -450,6 +411,10 @@ contract PortfolioVault is ReentrancyGuard {
         if (_totalSupply == 0) return 0;
 
         uint256 currentSharePrice = (totalAssets() * 1e18) / _totalSupply;
+        if (highWaterMark == 0) {
+            highWaterMark = currentSharePrice;
+            return 0;
+        }
         if (currentSharePrice <= highWaterMark) return 0;
 
         uint256 profitPerShare = currentSharePrice - highWaterMark;
@@ -460,7 +425,7 @@ contract PortfolioVault is ReentrancyGuard {
             IERC20(_asset).safeTransfer(feeRecipient, fee);
             highWaterMark = currentSharePrice;
             if (eventNotifier != address(0)) {
-                IEventNotifier(eventNotifier).emitPerformanceFee(address(this), riskTier, msg.sender, fee, totalAssetsUSD());
+                IEventNotifier(eventNotifier).emitPerformanceFee(address(this), riskTier, msg.sender, fee, totalAssets());
             }
         }
     }
@@ -546,7 +511,7 @@ contract PortfolioVault is ReentrancyGuard {
         _mint(receiver, shares);
         emit Deposit(caller, receiver, assets_, shares);
         if (eventNotifier != address(0)) {
-            IEventNotifier(eventNotifier).emitDeposit(caller, address(this), riskTier, assets_, shares, totalAssetsUSD());
+            IEventNotifier(eventNotifier).emitDeposit(caller, address(this), riskTier, assets_, shares, totalAssets());
         }
     }
 
@@ -564,7 +529,7 @@ contract PortfolioVault is ReentrancyGuard {
         IERC20(_asset).safeTransfer(receiver, assets_);
         emit Withdraw(caller, receiver, owner_, assets_, shares);
         if (eventNotifier != address(0)) {
-            IEventNotifier(eventNotifier).emitWithdrawal(caller, address(this), riskTier, assets_, shares, totalAssetsUSD());
+            IEventNotifier(eventNotifier).emitWithdrawal(caller, address(this), riskTier, assets_, shares, totalAssets());
         }
     }
 
@@ -596,6 +561,33 @@ contract PortfolioVault is ReentrancyGuard {
         if (current == type(uint256).max) return;
         if (current < amount) revert InsufficientAllowance();
         _allowances[owner_][spender] = current - amount;
+    }
+
+    function _calculatePortfolioValue() internal view returns (uint256 totalValue) {
+        for (uint256 i = 0; i < portfolio.length; i++) {
+            address token = portfolio[i].token;
+            if (token.code.length == 0) continue;
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            if (balance == 0) continue;
+
+            address feed = priceFeeds[token];
+            if (feed == address(0)) continue;
+
+            uint256 price = getTokenPrice(token);
+            uint8 tokenDec = IERC20Metadata(token).decimals();
+            totalValue += (balance * price) / (10 ** tokenDec);
+        }
+
+        uint256 denomBalance = IERC20(_asset).balanceOf(address(this));
+        if (denomBalance > 0) {
+            uint8 denomDec = IERC20Metadata(_asset).decimals();
+            address denomFeed = priceFeeds[_asset];
+            if (denomFeed != address(0)) {
+                totalValue += (denomBalance * getTokenPrice(_asset)) / (10 ** denomDec);
+            } else {
+                totalValue += _scaleDecimals(denomBalance, denomDec, PRICE_DECIMALS);
+            }
+        }
     }
 
     function _scaleDecimals(uint256 amount, uint8 fromDec, uint8 toDec) internal pure returns (uint256) {

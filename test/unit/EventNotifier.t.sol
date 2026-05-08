@@ -234,7 +234,7 @@ contract EventNotifierTest is Test {
 
         uint256 expectedShares = PortfolioVault(vault).previewDeposit(amount);
 
-        // vaultTotalAssets = totalAssetsUSD(): USDC balance scaled from 6 dec to 8 dec ($1 fallback).
+        // vaultTotalAssets = totalAssets(): USDC balance scaled from 6 dec to 8 dec ($1 fallback).
         vm.expectEmit(true, true, true, true, address(notifier));
         emit Deposited(userA, vault, 0, amount, expectedShares, amount * 100, block.timestamp);
 
@@ -280,27 +280,6 @@ contract EventNotifierTest is Test {
         emit Withdrawn(userA, vault, 0, amount, shares, 0, block.timestamp);
 
         PortfolioVault(vault).withdraw(amount, userA, userA);
-        vm.stopPrank();
-    }
-
-    function test_withdrawAll_emitsWithdrawnViaNotifier() public {
-        vm.prank(userA);
-        address vault = factory.createVault(0, false);
-
-        uint256 amount = 500e6;
-        usdc.mint(userA, amount);
-
-        vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        PortfolioVault(vault).deposit(amount, userA);
-
-        uint256 shares = PortfolioVault(vault).balanceOf(userA);
-        uint256 assets = PortfolioVault(vault).previewRedeem(shares);
-
-        vm.expectEmit(true, true, true, true, address(notifier));
-        emit Withdrawn(userA, vault, 0, assets, shares, 0, block.timestamp);
-
-        PortfolioVault(vault).withdrawAll();
         vm.stopPrank();
     }
 

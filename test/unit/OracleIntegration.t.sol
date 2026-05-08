@@ -176,34 +176,34 @@ contract OracleIntegrationTest is Test {
         vault.getTokenPrice(address(wbtc));
     }
 
-    // ─── totalAssetsUSD: portfolio tokens ────────────────────────────────────
+    // ─── totalAssets: portfolio tokens ───────────────────────────────────────
 
-    function test_totalAssetsUSD_zeroWhenVaultEmpty() public view {
+    function test_totalAssets_zeroWhenVaultEmpty() public view {
         // Vault holds no portfolio tokens and no denomination asset.
-        assertEq(vault.totalAssetsUSD(), 0);
+        assertEq(vault.totalAssets(), 0);
     }
 
-    function test_totalAssetsUSD_singleWbtcHolding() public {
+    function test_totalAssets_singleWbtcHolding() public {
         // Give the vault 0.5 WBTC (8 dec)
         uint256 half_btc = 0.5e8;
         wbtc.mint(address(vault), half_btc);
 
         // Expected: 0.5 BTC * $60 000 = $30 000 (8 dec) = 30_000e8
         uint256 expected = (half_btc * uint256(BTC_PRICE)) / 1e8;
-        assertEq(vault.totalAssetsUSD(), expected, "0.5 BTC USD value wrong");
+        assertEq(vault.totalAssets(), expected, "0.5 BTC USD value wrong");
     }
 
-    function test_totalAssetsUSD_singleWethHolding() public {
+    function test_totalAssets_singleWethHolding() public {
         // Give the vault 10 WETH (18 dec)
         uint256 ten_eth = 10e18;
         weth.mint(address(vault), ten_eth);
 
         // Expected: 10 ETH * $3 000 = $30 000 (8 dec) = 30_000e8
         uint256 expected = (ten_eth * uint256(ETH_PRICE)) / 1e18;
-        assertEq(vault.totalAssetsUSD(), expected, "10 ETH USD value wrong");
+        assertEq(vault.totalAssets(), expected, "10 ETH USD value wrong");
     }
 
-    function test_totalAssetsUSD_multipleTokensSummed() public {
+    function test_totalAssets_multipleTokensSummed() public {
         // 1 WBTC + 10 WETH
         uint256 one_btc = 1e8;
         uint256 ten_eth = 10e18;
@@ -214,31 +214,31 @@ contract OracleIntegrationTest is Test {
         uint256 ethValue = (ten_eth * uint256(ETH_PRICE)) / 1e18;  // $30 000
         uint256 expected = btcValue + ethValue;                     // $90 000
 
-        assertEq(vault.totalAssetsUSD(), expected, "Combined TVL wrong");
+        assertEq(vault.totalAssets(), expected, "Combined TVL wrong");
     }
 
-    function test_totalAssetsUSD_skipsTokensWithZeroBalance() public {
+    function test_totalAssets_skipsTokensWithZeroBalance() public {
         // Only WETH in the vault; WBTC balance = 0.
         uint256 five_eth = 5e18;
         weth.mint(address(vault), five_eth);
 
         uint256 expected = (five_eth * uint256(ETH_PRICE)) / 1e18;
-        assertEq(vault.totalAssetsUSD(), expected, "Should skip zero-balance WBTC");
+        assertEq(vault.totalAssets(), expected, "Should skip zero-balance WBTC");
     }
 
-    // ─── totalAssetsUSD: denomination asset fallback ($1 per USDC) ───────────
+    // ─── totalAssets: denomination asset fallback ($1 per USDC) ─────────────
 
-    function test_totalAssetsUSD_usdcFallbackScales6DecTo8Dec() public {
+    function test_totalAssets_usdcFallbackScales6DecTo8Dec() public {
         // Vault holds 1 000 USDC (6 dec, no feed registered → treated as $1)
         uint256 usdcAmount = 1_000e6;
         usdc.mint(address(vault), usdcAmount);
 
         // Expected: 1 000 USDC * $1 = $1 000 (8 dec) = 1_000e8
         uint256 expected = 1_000e8;
-        assertEq(vault.totalAssetsUSD(), expected, "USDC $1 fallback wrong");
+        assertEq(vault.totalAssets(), expected, "USDC $1 fallback wrong");
     }
 
-    function test_totalAssetsUSD_combinedPortfolioAndDenomAsset() public {
+    function test_totalAssets_combinedPortfolioAndDenomAsset() public {
         // Vault holds 0.1 WBTC + 1 000 USDC
         uint256 tenth_btc  = 0.1e8;
         uint256 usdcAmount = 1_000e6;
@@ -249,7 +249,7 @@ contract OracleIntegrationTest is Test {
         uint256 usdcValue = 1_000e8;                                  // $1 000
         uint256 expected  = btcValue + usdcValue;                     // $7 000
 
-        assertEq(vault.totalAssetsUSD(), expected, "Combined portfolio + USDC wrong");
+        assertEq(vault.totalAssets(), expected, "Combined portfolio + USDC wrong");
     }
 
     // ─── Price freshness boundary ─────────────────────────────────────────────
@@ -269,18 +269,4 @@ contract OracleIntegrationTest is Test {
         vault.getTokenPrice(address(wbtc));
     }
 
-    // ─── totalAssets() unchanged (ERC-4626 share math) ───────────────────────
-
-    function test_totalAssets_returnsDenomAssetBalance() public {
-        uint256 usdcAmount = 5_000e6;
-        usdc.mint(address(vault), usdcAmount);
-        assertEq(vault.totalAssets(), usdcAmount, "totalAssets should be raw USDC balance");
-    }
-
-    function test_totalAssets_unaffectedByPortfolioTokens() public {
-        // Even when vault holds WBTC, totalAssets() only counts USDC.
-        wbtc.mint(address(vault), 1e8);
-        usdc.mint(address(vault), 1_000e6);
-        assertEq(vault.totalAssets(), 1_000e6, "totalAssets should ignore WBTC");
-    }
 }
