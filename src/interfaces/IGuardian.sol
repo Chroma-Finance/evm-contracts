@@ -1,16 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-/// @notice Interface for the two-party withdrawal approval module.
+/// @notice Interface for the gasless guardian module using EIP-712 off-chain signatures.
 interface IGuardian {
-    /// @notice Vault owner initiates a withdrawal request.
-    function requestWithdrawal(address vault, uint256 amount, address recipient) external;
+    /// @notice Returns the guardian address set for a vault.
+    function guardians(address vault) external view returns (address);
 
-    /// @notice Guardian approves a pending withdrawal request.
-    function approveWithdrawal(address vault, address owner) external;
+    /// @notice Returns the current nonce for a vault/owner pair.
+    function nonces(address vault, address owner) external view returns (uint256);
 
-    /// @notice Called by the vault during withdraw() to verify and consume the approval.
-    /// @return approved Whether the withdrawal is approved.
-    /// @return amount   The approved withdrawal amount.
-    function executeWithdrawal(address vault) external returns (bool approved, uint256 amount);
+    /// @notice Sets or removes the guardian for a vault. Only callable by vault owner.
+    function setGuardian(address vault, address guardian) external;
+
+    /// @notice Validates an EIP-712 guardian signature for a withdrawal. Increments nonce on success.
+    function validateWithdrawal(
+        address vault,
+        address owner,
+        uint256 amount,
+        address recipient,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (bool);
+
+    /// @notice Returns the current nonce for a vault/owner pair.
+    function getNonce(address vault, address owner) external view returns (uint256);
+
+    /// @notice Returns the EIP-712 domain separator.
+    function getDomainSeparator() external view returns (bytes32);
+
+    event GuardianSet(address indexed vault, address indexed guardian);
 }

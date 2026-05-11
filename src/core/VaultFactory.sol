@@ -6,6 +6,7 @@ import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {PortfolioVault} from "./PortfolioVault.sol";
 import {EventNotifier} from "./EventNotifier.sol";
 import {RiskTierRegistry} from "../utils/RiskTierRegistry.sol";
+import {GuardianModule} from "../modules/GuardianModule.sol";
 
 /**
  * @title VaultFactory
@@ -34,6 +35,9 @@ contract VaultFactory is Ownable {
 
     /// @notice Centralized event emitter for all financial events.
     address public eventNotifier;
+
+    /// @notice Shared guardian module for EIP-712 signature-based withdrawal approval.
+    GuardianModule public guardianModule;
 
     /// @notice User vaults by tier: user => tier => vault.
     mapping(address => mapping(uint8 => address)) public userVaults;
@@ -81,6 +85,8 @@ contract VaultFactory is Ownable {
         eventNotifier = address(notifier);
         // Factory must be authorized to call emitVaultCreated.
         notifier.authorize(address(this));
+
+        guardianModule = new GuardianModule();
     }
 
     // ─── External ────────────────────────────────────────────────────────────
@@ -107,6 +113,7 @@ contract VaultFactory is Ownable {
             denominationAsset,
             feeRecipient,
             eventNotifier,
+            address(guardianModule),
             tokens,
             weights,
             feeds
@@ -183,6 +190,11 @@ contract VaultFactory is Ownable {
     /// @notice Total number of deployed vaults.
     function getVaultCount() external view returns (uint256) {
         return allVaults.length;
+    }
+
+    /// @notice Returns the shared guardian module address.
+    function getGuardianModule() external view returns (address) {
+        return address(guardianModule);
     }
 
     /**

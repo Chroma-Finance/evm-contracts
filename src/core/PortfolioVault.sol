@@ -144,14 +144,15 @@ contract PortfolioVault is ReentrancyGuard {
 
     /**
      * @notice Initialises the vault. Called once by VaultFactory immediately after cloning.
-     * @param owner_          Vault owner.
-     * @param tier_           Risk tier (0 = Low, 1 = Medium, 2 = High).
-     * @param asset_          Denomination asset for ERC-4626 accounting.
-     * @param feeRecipient_   Address that receives management fee shares and performance fees.
-     * @param eventNotifier_  EventNotifier contract for centralized financial event emission.
-     * @param tokens_         Portfolio token addresses (must match weights_ and priceFeeds_).
-     * @param weights_        Allocation weights in basis points; must sum to 10 000.
-     * @param priceFeeds_     Chainlink price feed per portfolio token (address(0) = no feed).
+     * @param owner_           Vault owner.
+     * @param tier_            Risk tier (0 = Low, 1 = Medium, 2 = High).
+     * @param asset_           Denomination asset for ERC-4626 accounting.
+     * @param feeRecipient_    Address that receives management fee shares and performance fees.
+     * @param eventNotifier_   EventNotifier contract for centralized financial event emission.
+     * @param guardianModule_  Shared guardian module address (address(0) to disable).
+     * @param tokens_          Portfolio token addresses (must match weights_ and priceFeeds_).
+     * @param weights_         Allocation weights in basis points; must sum to 10 000.
+     * @param priceFeeds_      Chainlink price feed per portfolio token (address(0) = no feed).
      */
     function initialize(
         address owner_,
@@ -159,6 +160,7 @@ contract PortfolioVault is ReentrancyGuard {
         address asset_,
         address feeRecipient_,
         address eventNotifier_,
+        address guardianModule_,
         address[] calldata tokens_,
         uint256[] calldata weights_,
         address[] calldata priceFeeds_
@@ -175,6 +177,7 @@ contract PortfolioVault is ReentrancyGuard {
         _asset = asset_;
         feeRecipient = feeRecipient_;
         eventNotifier = eventNotifier_;
+        guardianModule = guardianModule_;
         lastFeeAccrual = block.timestamp;
 
         string memory tierLabel = tier_ == 0 ? "Low" : tier_ == 1 ? "Medium" : "High";
@@ -316,16 +319,43 @@ contract PortfolioVault is ReentrancyGuard {
     }
 
     /**
-     * @notice Withdraw `assets_` of the denomination token by burning the required shares.
-     * @dev ERC-4626 compliant. Enforces receiver == owner == msg.sender for self-custody safety.
-     *      Guardian approval required when {guardianModule} is set.
-     *      No fees charged in MVP; users receive 100% of proceeds.
+     * @notice Withdraw `assets_` of denomination token. Backward-compatible overload (no guardian signature).
+     * @dev Calls the full withdraw with block.timestamp deadline and empty signature.
+     *      Succeeds without a signature when no guardian is configured for the vault.
      */
     function withdraw(
         uint256 assets_,
         address receiver,
         address owner_
+    ) external nonReentrant returns (uint256 shares) {
+        return _withdrawImpl(assets_, receiver, owner_, block.timestamp, new bytes(0));
+    }
+
+    /**
+     * @notice Withdraw `assets_` of the denomination token by burning the required shares.
+     * @dev ERC-4626 compliant. Enforces receiver == owner == msg.sender for self-custody safety.
+     *      Guardian approval required when {guardianModule} is set.
+     *      No fees charged in MVP; users receive 100% of proceeds.
+     * @param deadline   Expiry timestamp for the guardian signature.
+     * @param signature  EIP-712 guardian signature approving this withdrawal.
+     */
+    function withdraw(
+        uint256 assets_,
+        address receiver,
+        address owner_,
+        uint256 deadline,
+        bytes calldata signature
     ) public nonReentrant returns (uint256 shares) {
+        return _withdrawImpl(assets_, receiver, owner_, deadline, signature);
+    }
+
+    function _withdrawImpl(
+        uint256 assets_,
+        address receiver,
+        address owner_,
+        uint256 deadline,
+        bytes memory signature
+    ) internal returns (uint256 shares) {
         if (assets_ == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
         if (receiver != msg.sender) revert Unauthorized();
@@ -335,7 +365,9 @@ contract PortfolioVault is ReentrancyGuard {
         _accrueManagementFee();
 
         if (guardianModule != address(0)) {
-            (bool approved,) = IGuardian(guardianModule).executeWithdrawal(address(this));
+            bool approved = IGuardian(guardianModule).validateWithdrawal(
+                address(this), owner_, assets_, receiver, deadline, signature
+            );
             if (!approved) revert GuardianApprovalRequired();
         }
 
@@ -350,26 +382,54 @@ contract PortfolioVault is ReentrancyGuard {
     }
 
     /**
-     * @notice Redeem `shares_` vault tokens for denomination asset.
-     * @dev No fees charged in MVP; users receive 100% of proceeds.
+     * @notice Redeem `shares_` vault tokens for denomination asset. Backward-compatible overload.
      */
     function redeem(
         uint256 shares_,
         address receiver,
         address owner_
+    ) external nonReentrant returns (uint256 assets_) {
+        return _redeemImpl(shares_, receiver, owner_, block.timestamp, new bytes(0));
+    }
+
+    /**
+     * @notice Redeem `shares_` vault tokens for denomination asset.
+     * @dev No fees charged in MVP; users receive 100% of proceeds.
+     * @param deadline   Expiry timestamp for the guardian signature.
+     * @param signature  EIP-712 guardian signature approving this withdrawal.
+     */
+    function redeem(
+        uint256 shares_,
+        address receiver,
+        address owner_,
+        uint256 deadline,
+        bytes calldata signature
     ) public nonReentrant returns (uint256 assets_) {
+        return _redeemImpl(shares_, receiver, owner_, deadline, signature);
+    }
+
+    function _redeemImpl(
+        uint256 shares_,
+        address receiver,
+        address owner_,
+        uint256 deadline,
+        bytes memory signature
+    ) internal returns (uint256 assets_) {
         if (shares_ == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
         if (shares_ > maxRedeem(owner_)) revert ExceedsMax();
 
         _accrueManagementFee();
 
+        assets_ = previewRedeem(shares_);
+
         if (guardianModule != address(0)) {
-            (bool approved,) = IGuardian(guardianModule).executeWithdrawal(address(this));
+            bool approved = IGuardian(guardianModule).validateWithdrawal(
+                address(this), owner_, assets_, receiver, deadline, signature
+            );
             if (!approved) revert GuardianApprovalRequired();
         }
 
-        assets_ = previewRedeem(shares_);
         if (swapRouter != address(0) && portfolio.length > 0) {
             assets_ = _swapFromPortfolio(shares_);
         }
@@ -378,21 +438,40 @@ contract PortfolioVault is ReentrancyGuard {
     }
 
     /**
-     * @notice Convenience function to exit the vault entirely, burning all caller shares.
-     * @dev Applies the same guardian gate as a normal withdrawal. No fees in MVP.
+     * @notice Exit vault entirely. Backward-compatible overload (no guardian signature).
      */
     function withdrawAll() external nonReentrant returns (uint256 assets_) {
+        return _withdrawAllImpl(block.timestamp, new bytes(0));
+    }
+
+    /**
+     * @notice Convenience function to exit the vault entirely, burning all caller shares.
+     * @dev Applies the same guardian gate as a normal withdrawal. No fees in MVP.
+     * @param deadline   Expiry timestamp for the guardian signature.
+     * @param signature  EIP-712 guardian signature approving this withdrawal.
+     */
+    function withdrawAll(
+        uint256 deadline,
+        bytes calldata signature
+    ) external nonReentrant returns (uint256 assets_) {
+        return _withdrawAllImpl(deadline, signature);
+    }
+
+    function _withdrawAllImpl(uint256 deadline, bytes memory signature) internal returns (uint256 assets_) {
         uint256 shares = _balances[msg.sender];
         if (shares == 0) revert ZeroAmount();
 
         _accrueManagementFee();
 
+        assets_ = previewRedeem(shares);
+
         if (guardianModule != address(0)) {
-            (bool approved,) = IGuardian(guardianModule).executeWithdrawal(address(this));
+            bool approved = IGuardian(guardianModule).validateWithdrawal(
+                address(this), msg.sender, assets_, msg.sender, deadline, signature
+            );
             if (!approved) revert GuardianApprovalRequired();
         }
 
-        assets_ = previewRedeem(shares);
         if (swapRouter != address(0) && portfolio.length > 0) {
             assets_ = _swapFromPortfolio(shares);
         }
