@@ -9,6 +9,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AggregatorV3Interface} from "@chainlink/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IGuardian} from "../interfaces/IGuardian.sol";
 import {IEventNotifier} from "../interfaces/IEventNotifier.sol";
+import {IChromaSwapRouter} from "../interfaces/ISwapRouter.sol";
 
 /**
  * @title PortfolioVault
@@ -58,6 +59,7 @@ contract PortfolioVault is ReentrancyGuard {
     address public guardianModule;
     address public recoveryModule;
     address public eventNotifier;
+    address public swapRouter;
 
     /// @notice Chainlink price feed per portfolio token (and optionally the denomination asset).
     mapping(address => address) public priceFeeds;
@@ -124,6 +126,7 @@ contract PortfolioVault is ReentrancyGuard {
     error NoPriceFeed(address token);
     error InvalidPrice(address token);
     error StalePriceFeed(address token);
+    error SwapFailed();
 
     // ─── Modifiers ───────────────────────────────────────────────────────────
 
@@ -219,19 +222,26 @@ contract PortfolioVault is ReentrancyGuard {
         price = uint256(answer);
     }
 
+    // ─── ERC-4626 share math ─────────────────────────────────────────────────
+    //
+    // totalAssets() returns USD value (8 decimals). To keep share math consistent,
+    // all conversions between denomination-token amounts and shares normalise via
+    // _assetToUsd / _usdToAsset so the same unit (USD 8-dec) is used on both sides
+    // of every mulDiv call.
+
     function convertToShares(uint256 assets_) public view returns (uint256) {
-        return _convertToShares(assets_, Math.Rounding.Floor);
+        return _convertToShares(_assetToUsd(assets_), Math.Rounding.Floor);
     }
 
     function convertToAssets(uint256 shares_) public view returns (uint256) {
-        return _convertToAssets(shares_, Math.Rounding.Floor);
+        return _usdToAsset(_convertToAssets(shares_, Math.Rounding.Floor));
     }
 
     function maxDeposit(address) public pure returns (uint256) { return type(uint256).max; }
     function maxMint(address)   public pure returns (uint256) { return type(uint256).max; }
 
     function maxWithdraw(address owner_) public view returns (uint256) {
-        return convertToAssets(_balances[owner_]);
+        return _usdToAsset(_convertToAssets(_balances[owner_], Math.Rounding.Floor));
     }
 
     function maxRedeem(address owner_) public view returns (uint256) {
@@ -239,25 +249,26 @@ contract PortfolioVault is ReentrancyGuard {
     }
 
     function previewDeposit(uint256 assets_) public view returns (uint256) {
-        return _convertToShares(assets_, Math.Rounding.Floor);
+        return _convertToShares(_assetToUsd(assets_), Math.Rounding.Floor);
     }
 
     function previewMint(uint256 shares_) public view returns (uint256) {
-        return _convertToAssets(shares_, Math.Rounding.Ceil);
+        return _usdToAsset(_convertToAssets(shares_, Math.Rounding.Ceil));
     }
 
     function previewWithdraw(uint256 assets_) public view returns (uint256) {
-        return _convertToShares(assets_, Math.Rounding.Ceil);
+        return _convertToShares(_assetToUsd(assets_), Math.Rounding.Ceil);
     }
 
     function previewRedeem(uint256 shares_) public view returns (uint256) {
-        return _convertToAssets(shares_, Math.Rounding.Floor);
+        return _usdToAsset(_convertToAssets(shares_, Math.Rounding.Floor));
     }
 
     /**
      * @notice Deposit `assets_` of the denomination token and receive vault shares.
      * @dev ERC-4626 compliant. Enforces receiver == msg.sender for self-custody safety.
-     *      TODO: After receiving denomination asset, swap into target portfolio allocation.
+     *      When a swap router is configured, assets are converted into the target portfolio
+     *      allocation before shares are calculated so pricing reflects the real holdings.
      */
     function deposit(uint256 assets_, address receiver) public nonReentrant returns (uint256 shares) {
         if (assets_ == 0) revert ZeroAmount();
@@ -267,10 +278,21 @@ contract PortfolioVault is ReentrancyGuard {
 
         _accrueManagementFee();
 
-        shares = previewDeposit(assets_);
-        _executeDeposit(msg.sender, receiver, assets_, shares);
+        // Snapshot share count using pre-deposit totalAssets (excludes incoming tokens).
+        // Uses USD value so share math stays consistent with totalAssets() units (8 dec).
+        shares = _convertToShares(_assetToUsd(assets_), Math.Rounding.Floor);
 
-        // TODO: Call SwapRouter to convert `assets_` into portfolio allocation.
+        IERC20(_asset).safeTransferFrom(msg.sender, address(this), assets_);
+
+        if (swapRouter != address(0) && portfolio.length > 0) {
+            _swapToPortfolio(assets_);
+        }
+
+        _mint(receiver, shares);
+        emit Deposit(msg.sender, receiver, assets_, shares);
+        if (eventNotifier != address(0)) {
+            IEventNotifier(eventNotifier).emitDeposit(msg.sender, address(this), riskTier, assets_, shares, totalAssets());
+        }
     }
 
     /**
@@ -294,7 +316,8 @@ contract PortfolioVault is ReentrancyGuard {
      * @dev ERC-4626 compliant. Enforces receiver == owner == msg.sender for self-custody safety.
      *      Guardian approval required when {guardianModule} is set.
      *      Performance fee is charged on profit above the high-water mark.
-     *      TODO: Before transfer, swap portfolio tokens back to denomination asset.
+     *      When a swap router is configured, the proportional portfolio holdings are
+     *      liquidated to the denomination asset before transfer.
      */
     function withdraw(
         uint256 assets_,
@@ -309,23 +332,27 @@ contract PortfolioVault is ReentrancyGuard {
 
         _accrueManagementFee();
 
-        // Guardian gate — vault calls the module which verifies and consumes the approval.
         if (guardianModule != address(0)) {
             (bool approved,) = IGuardian(guardianModule).executeWithdrawal(address(this));
             if (!approved) revert GuardianApprovalRequired();
         }
 
-        // TODO: Call SwapRouter to liquidate portfolio tokens into denomination asset.
-
-        uint256 fee = _chargePerformanceFee(assets_);
         shares = previewWithdraw(assets_);
-        _executeWithdraw(msg.sender, receiver, owner_, assets_ - fee, shares);
+
+        uint256 proceeds = assets_;
+        if (swapRouter != address(0) && portfolio.length > 0) {
+            proceeds = _swapFromPortfolio(shares);
+        }
+
+        uint256 fee = _chargePerformanceFee(proceeds);
+        _executeWithdraw(msg.sender, receiver, owner_, proceeds - fee, shares);
     }
 
     /**
      * @notice Redeem `shares_` vault tokens for denomination asset.
      * @dev Performance fee is charged on profit above the high-water mark.
-     *      TODO: Before transfer, swap portfolio tokens back to denomination asset.
+     *      When a swap router is configured, the proportional portfolio holdings are
+     *      liquidated to the denomination asset before transfer.
      */
     function redeem(
         uint256 shares_,
@@ -343,17 +370,20 @@ contract PortfolioVault is ReentrancyGuard {
             if (!approved) revert GuardianApprovalRequired();
         }
 
-        // TODO: Call SwapRouter to liquidate portfolio tokens into denomination asset.
+        uint256 proceeds = previewRedeem(shares_);
+        if (swapRouter != address(0) && portfolio.length > 0) {
+            proceeds = _swapFromPortfolio(shares_);
+        }
 
-        assets_ = previewRedeem(shares_);
-        uint256 fee = _chargePerformanceFee(assets_);
-        _executeWithdraw(msg.sender, receiver, owner_, assets_ - fee, shares_);
+        uint256 fee = _chargePerformanceFee(proceeds);
+        assets_ = proceeds - fee;
+        _executeWithdraw(msg.sender, receiver, owner_, assets_, shares_);
     }
 
     /**
      * @notice Convenience function to exit the vault entirely, burning all caller shares.
      * @dev Applies the same guardian gate and performance fee as a normal withdrawal.
-     *      TODO: Before transfer, swap portfolio tokens back to denomination asset.
+     *      When a swap router is configured, all portfolio holdings are liquidated first.
      */
     function withdrawAll() external nonReentrant returns (uint256 assets_) {
         uint256 shares = _balances[msg.sender];
@@ -366,11 +396,14 @@ contract PortfolioVault is ReentrancyGuard {
             if (!approved) revert GuardianApprovalRequired();
         }
 
-        // TODO: Call SwapRouter to liquidate portfolio tokens into denomination asset.
+        uint256 proceeds = previewRedeem(shares);
+        if (swapRouter != address(0) && portfolio.length > 0) {
+            proceeds = _swapFromPortfolio(shares);
+        }
 
-        assets_ = previewRedeem(shares);
-        uint256 fee = _chargePerformanceFee(assets_);
-        _executeWithdraw(msg.sender, msg.sender, msg.sender, assets_ - fee, shares);
+        uint256 fee = _chargePerformanceFee(proceeds);
+        assets_ = proceeds - fee;
+        _executeWithdraw(msg.sender, msg.sender, msg.sender, assets_, shares);
     }
 
     // ─── Fee logic ───────────────────────────────────────────────────────────
@@ -448,6 +481,11 @@ contract PortfolioVault is ReentrancyGuard {
         emit RecoveryModuleSet(recovery_);
     }
 
+    /// @notice Sets the swap router used to convert tokens on deposit and withdrawal.
+    function setSwapRouter(address swapRouter_) external onlyOwner {
+        swapRouter = swapRouter_;
+    }
+
     /**
      * @notice Transfers vault ownership to a new address.
      * @dev Callable by the current owner or by the registered {recoveryModule}.
@@ -498,12 +536,33 @@ contract PortfolioVault is ReentrancyGuard {
     // ─── Internal helpers ────────────────────────────────────────────────────
 
     // Virtual offsets (+1) prevent inflation attacks and division-by-zero at initialisation.
-    function _convertToShares(uint256 assets_, Math.Rounding rounding) internal view returns (uint256) {
-        return assets_.mulDiv(_totalSupply + 1, totalAssets() + 1, rounding);
+    // Both functions operate in USD (8 dec) so they stay consistent with totalAssets().
+    function _convertToShares(uint256 usdAmount, Math.Rounding rounding) internal view returns (uint256) {
+        return usdAmount.mulDiv(_totalSupply + 1, totalAssets() + 1, rounding);
     }
 
     function _convertToAssets(uint256 shares_, Math.Rounding rounding) internal view returns (uint256) {
         return shares_.mulDiv(totalAssets() + 1, _totalSupply + 1, rounding);
+    }
+
+    /// @dev Converts denomination-token amount to USD (8 dec), matching totalAssets() units.
+    function _assetToUsd(uint256 assetAmount) internal view returns (uint256) {
+        uint8 dec = IERC20Metadata(_asset).decimals();
+        address feed = priceFeeds[_asset];
+        if (feed != address(0)) {
+            return (assetAmount * getTokenPrice(_asset)) / (10 ** dec);
+        }
+        return _scaleDecimals(assetAmount, dec, PRICE_DECIMALS);
+    }
+
+    /// @dev Converts USD (8 dec) back to denomination-token amount.
+    function _usdToAsset(uint256 usdAmount) internal view returns (uint256) {
+        uint8 dec = IERC20Metadata(_asset).decimals();
+        address feed = priceFeeds[_asset];
+        if (feed != address(0)) {
+            return (usdAmount * (10 ** dec)) / getTokenPrice(_asset);
+        }
+        return _scaleDecimals(usdAmount, PRICE_DECIMALS, dec);
     }
 
     function _executeDeposit(address caller, address receiver, uint256 assets_, uint256 shares) internal {
@@ -599,5 +658,50 @@ contract PortfolioVault is ReentrancyGuard {
         uint256 sum;
         for (uint256 i = 0; i < weights_.length; i++) sum += weights_[i];
         if (sum != BPS_DENOMINATOR) revert InvalidWeights();
+    }
+
+    /// @dev Splits `depositAmount` of the denomination asset across the portfolio per target weights
+    ///      and calls SwapRouter.swapToPortfolio(). The vault must hold depositAmount before calling.
+    function _swapToPortfolio(uint256 depositAmount) internal {
+        uint256 n = portfolio.length;
+        address[] memory tokensOut = new address[](n);
+        uint256[] memory amountsIn = new uint256[](n);
+
+        uint256 remaining = depositAmount;
+        for (uint256 i = 0; i < n; i++) {
+            tokensOut[i] = portfolio[i].token;
+            if (i == n - 1) {
+                amountsIn[i] = remaining;
+            } else {
+                uint256 slice = (depositAmount * portfolio[i].targetWeight) / BPS_DENOMINATOR;
+                amountsIn[i] = slice;
+                remaining   -= slice;
+            }
+        }
+
+        IERC20(_asset).forceApprove(swapRouter, depositAmount);
+        IChromaSwapRouter(swapRouter).swapToPortfolio(_asset, tokensOut, amountsIn);
+    }
+
+    /// @dev Swaps the proportional share of each portfolio token back to the denomination asset.
+    ///      `sharesToRedeem` must not exceed _totalSupply. Returns total denomination asset received.
+    function _swapFromPortfolio(uint256 sharesToRedeem) internal returns (uint256 proceeds) {
+        uint256 supply = _totalSupply;
+        uint256 n      = portfolio.length;
+        address[] memory tokensIn  = new address[](n);
+        uint256[] memory amountsIn = new uint256[](n);
+
+        for (uint256 i = 0; i < n; i++) {
+            address token   = portfolio[i].token;
+            uint256 balance = IERC20(token).balanceOf(address(this));
+            uint256 amount  = balance * sharesToRedeem / supply;
+            tokensIn[i]  = token;
+            amountsIn[i] = amount;
+            if (amount > 0) {
+                IERC20(token).forceApprove(swapRouter, amount);
+            }
+        }
+
+        proceeds = IChromaSwapRouter(swapRouter).swapToInputToken(tokensIn, amountsIn, _asset);
     }
 }

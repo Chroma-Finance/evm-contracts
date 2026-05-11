@@ -27,8 +27,21 @@ import {RiskTierRegistry} from "../src/utils/RiskTierRegistry.sol";
  *         Tier 2 — High Risk   : 25% WBTC | 25% WETH | 15% wstETH | 10% XAUT | 10% PAXG | 15% Alts
  */
 contract DeployScript is Script {
-    // ─── Arbitrum One — Uniswap V3 SwapRouter ────────────────────────────────
+    // ─── Arbitrum One addresses ───────────────────────────────────────────────
+
     address constant UNISWAP_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+
+    // Tokens
+    address constant USDC  = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
+    address constant WETH  = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
+    address constant WBTC  = 0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f;
+    address constant USDT  = 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9;
+    address constant DAI   = 0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1;
+
+    // Chainlink price feeds (Arbitrum One)
+    address constant FEED_USDC = 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3;
+    address constant FEED_WETH = 0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612;
+    address constant FEED_WBTC = 0x6ce185860a4963106506C203335A2910413708e9;
 
     function run() external {
         uint256 deployerKey  = vm.envUint("PRIVATE_KEY");
@@ -52,6 +65,18 @@ contract DeployScript is Script {
         SwapRouter swapRouter = new SwapRouter(UNISWAP_ROUTER);
         console2.log("SwapRouter       :", address(swapRouter));
 
+        // Configure SwapRouter — price feeds
+        swapRouter.setPriceFeed(USDC, FEED_USDC);
+        swapRouter.setPriceFeed(WETH, FEED_WETH);
+        swapRouter.setPriceFeed(WBTC, FEED_WBTC);
+
+        // Configure SwapRouter — pool fee tiers (Uniswap V3 Arbitrum)
+        swapRouter.setPoolFee(USDC, WETH,  500);   // 0.05%
+        swapRouter.setPoolFee(USDC, WBTC,  3000);  // 0.30%
+        swapRouter.setPoolFee(USDC, USDT,  100);   // 0.01%
+        swapRouter.setPoolFee(USDC, DAI,   100);   // 0.01%
+        swapRouter.setPoolFee(WETH, WBTC,  3000);  // 0.30%
+
         // 2. Deploy core factory (requires registry + denomination asset + fee manager)
         VaultFactory factory = new VaultFactory(denomination, address(registry), address(feeManager));
         console2.log("VaultFactory     :", address(factory));
@@ -67,6 +92,8 @@ contract DeployScript is Script {
         console2.log("SocialRecovery   :", address(recovery));
 
         // TODO: Populate risk tiers via registry.createTier() with Arbitrum token addresses.
+        // TODO: After creating each vault, call vault.setSwapRouter(address(swapRouter))
+        //       and swapRouter.setAuthorizedVault(vaultAddress).
         // TODO: Transfer ownership of registry/feeManager/factory to governance multisig.
 
         vm.stopBroadcast();
