@@ -18,7 +18,5 @@ interface IVault {
 
     // Admin
     function transferOwnership(address newOwner) external;
-    function setGuardian(address guardian) external;
     function setGuardianAddress(address newGuardian) external;
-    function setRecovery(address recovery) external;
 }

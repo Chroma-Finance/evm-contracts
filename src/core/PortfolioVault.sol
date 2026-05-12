@@ -114,8 +114,6 @@ contract PortfolioVault is ReentrancyGuard {
     );
 
     // Vault-specific (security events remain here; financial events route through EventNotifier)
-    event GuardianModuleSet(address indexed guardian);
-    event RecoveryModuleSet(address indexed recovery);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event GuardianAddressUpdated(address indexed newGuardian);
 
@@ -151,6 +149,8 @@ contract PortfolioVault is ReentrancyGuard {
      * @param feeRecipient_    Address that receives management fee shares and performance fees.
      * @param eventNotifier_   EventNotifier contract for centralized financial event emission.
      * @param guardianModule_  Shared guardian module address (address(0) to disable).
+     * @param recoveryModule_  Social recovery module address (address(0) to disable).
+     *                         Immutable after deployment — cannot be changed by the owner.
      * @param tokens_          Portfolio token addresses (must match weights_ and priceFeeds_).
      * @param weights_         Allocation weights in basis points; must sum to 10 000.
      * @param priceFeeds_      Chainlink price feed per portfolio token (address(0) = no feed).
@@ -162,6 +162,7 @@ contract PortfolioVault is ReentrancyGuard {
         address feeRecipient_,
         address eventNotifier_,
         address guardianModule_,
+        address recoveryModule_,
         address[] calldata tokens_,
         uint256[] calldata weights_,
         address[] calldata priceFeeds_
@@ -179,6 +180,7 @@ contract PortfolioVault is ReentrancyGuard {
         feeRecipient = feeRecipient_;
         eventNotifier = eventNotifier_;
         guardianModule = guardianModule_;
+        recoveryModule = recoveryModule_;
         lastFeeAccrual = block.timestamp;
 
         string memory tierLabel = tier_ == 0 ? "Low" : tier_ == 1 ? "Medium" : "High";
@@ -509,22 +511,6 @@ contract PortfolioVault is ReentrancyGuard {
     }
 
     // ─── Module setters ──────────────────────────────────────────────────────
-
-    /**
-     * @notice Attaches or detaches a guardian module.
-     * @dev Setting address(0) begins a guardian removal; the GuardianModule itself
-     *      enforces the 7-day removal delay before actually clearing approval rights.
-     */
-    function setGuardian(address guardian_) external onlyOwner {
-        guardianModule = guardian_;
-        emit GuardianModuleSet(guardian_);
-    }
-
-    /// @notice Attaches or detaches a social recovery module.
-    function setRecovery(address recovery_) external onlyOwner {
-        recoveryModule = recovery_;
-        emit RecoveryModuleSet(recovery_);
-    }
 
     /// @notice Sets the swap router used to convert tokens on deposit and withdrawal.
     function setSwapRouter(address swapRouter_) external onlyOwner {

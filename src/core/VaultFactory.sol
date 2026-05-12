@@ -7,6 +7,7 @@ import {PortfolioVault} from "./PortfolioVault.sol";
 import {EventNotifier} from "./EventNotifier.sol";
 import {RiskTierRegistry} from "../utils/RiskTierRegistry.sol";
 import {GuardianModule} from "../modules/GuardianModule.sol";
+import {SocialRecoveryModule} from "../modules/SocialRecoveryModule.sol";
 
 /**
  * @title VaultFactory
@@ -38,6 +39,9 @@ contract VaultFactory is Ownable {
 
     /// @notice Shared guardian module for EIP-712 signature-based withdrawal approval.
     GuardianModule public guardianModule;
+
+    /// @notice Shared social recovery module wired immutably into every vault at deployment.
+    SocialRecoveryModule public recoveryModule;
 
     /// @notice User vaults by tier: user => tier => vault.
     mapping(address => mapping(uint8 => address)) public userVaults;
@@ -86,7 +90,8 @@ contract VaultFactory is Ownable {
         // Factory must be authorized to call emitVaultCreated.
         notifier.authorize(address(this));
 
-        guardianModule = new GuardianModule();
+        guardianModule  = new GuardianModule();
+        recoveryModule  = new SocialRecoveryModule();
     }
 
     // ─── External ────────────────────────────────────────────────────────────
@@ -114,6 +119,7 @@ contract VaultFactory is Ownable {
             feeRecipient,
             eventNotifier,
             address(guardianModule),
+            address(recoveryModule),
             tokens,
             weights,
             feeds
@@ -195,6 +201,11 @@ contract VaultFactory is Ownable {
     /// @notice Returns the shared guardian module address.
     function getGuardianModule() external view returns (address) {
         return address(guardianModule);
+    }
+
+    /// @notice Returns the shared social recovery module address.
+    function getRecoveryModule() external view returns (address) {
+        return address(recoveryModule);
     }
 
     /**
