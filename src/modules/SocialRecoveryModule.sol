@@ -1,34 +1,53 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IRecovery} from "../interfaces/IRecovery.sol";
 import {IVault} from "../interfaces/IVault.sol";
 
 /**
  * @title SocialRecoveryModule
- * @notice 3-of-5 guardian social recovery for lost vault keys, inspired by
- *         Vitalik Buterin's social recovery wallet design.
+ * @notice Gasless social recovery using off-chain EIP-712 guardian signatures.
  *
  *         Flow:
  *         1. Owner calls {setRecoveryConfig} to register guardians and threshold.
- *         2. Any guardian calls {initiateRecovery} with a proposed new owner.
- *            The initiator's approval is counted automatically.
- *         3. Additional guardians call {approveRecovery} until threshold is met.
- *         4. After the 48-hour timelock, anyone calls {executeRecovery}.
- *         5. The current owner may {vetoRecovery} at any point during the timelock.
+ *         2. Guardians sign off-chain (no gas, no transactions) approving either:
+ *            - Ownership transfer:  OwnershipRecovery(vault, newOwner, nonce)
+ *            - Guardian replacement: GuardianRecovery(vault, newGuardian, nonce)
+ *         3. Any caller submits threshold-many signatures in a single transaction:
+ *            - {executeOwnershipRecovery} or {executeGuardianRecovery}
+ *            Signatures are verified on-chain; a 48-hour timelock begins.
+ *         4. After 48 hours anyone calls {finalizeRecovery} to execute the action.
+ *            Recovery expires 7 days after the timelock opens (if not finalized).
  *
- *         Nonce-based approval tracking: each new {initiateRecovery} call increments
- *         the vault nonce, so previous approval votes are automatically invalidated
- *         without requiring storage deletion of a mapping-inside-struct.
+ *         Design decisions:
+ *         - No veto function: a compromised owner wallet cannot block recovery.
+ *         - Shared nonce per vault: prevents both action types being active at once.
+ *         - Separate typehashes: ownership signatures cannot be reused for guardian changes.
+ *         - Nonce increments only on finalization: invalidates all prior signatures.
  */
-contract SocialRecoveryModule is IRecovery {
+contract SocialRecoveryModule is IRecovery, EIP712 {
     // ─── Constants ───────────────────────────────────────────────────────────
 
-    uint256 public constant TIMELOCK_PERIOD = 48 hours;
-    uint256 public constant MAX_GUARDIANS   = 5;
-    uint256 public constant MIN_THRESHOLD   = 2;
+    uint256 public constant TIMELOCK_PERIOD      = 48 hours;
+    uint256 public constant MAX_RECOVERY_DURATION = 7 days;
+    uint256 public constant MAX_GUARDIANS         = 5;
+    uint256 public constant MIN_THRESHOLD         = 2;
+
+    // ─── EIP-712 Typehashes ──────────────────────────────────────────────────
+
+    bytes32 public constant OWNERSHIP_RECOVERY_TYPEHASH = keccak256(
+        "OwnershipRecovery(address vault,address newOwner,uint256 nonce)"
+    );
+
+    bytes32 public constant GUARDIAN_RECOVERY_TYPEHASH = keccak256(
+        "GuardianRecovery(address vault,address newGuardian,uint256 nonce)"
+    );
 
     // ─── Types ───────────────────────────────────────────────────────────────
+
+    enum RecoveryAction { TRANSFER_OWNERSHIP, SET_GUARDIAN }
 
     struct RecoveryConfig {
         address[] guardians;
@@ -36,34 +55,26 @@ contract SocialRecoveryModule is IRecovery {
     }
 
     struct RecoveryRequest {
-        address newOwner;
-        uint256 requestTime;
-        uint256 approvalCount;
-        bool    executed;
-        bool    vetoed;
+        RecoveryAction action;
+        address        targetAddress;
+        uint256        executeAfter;
+        uint256        nonce;
+        bool           executed;
     }
 
     // ─── State ───────────────────────────────────────────────────────────────
 
-    /// @notice vault → guardian configuration set by the vault owner.
-    mapping(address => RecoveryConfig) private _configs;
-
-    /// @notice vault → active recovery request.
-    mapping(address => RecoveryRequest) public requests;
-
-    /// @notice Incremented on each new recovery initiation to invalidate stale approvals.
-    mapping(address => uint256) private _nonces;
-
-    /// @notice vault → nonce → guardian → hasApproved.
-    mapping(address => mapping(uint256 => mapping(address => bool))) private _approvals;
+    mapping(address => RecoveryConfig)  private _configs;
+    mapping(address => RecoveryRequest) public  requests;
+    mapping(address => uint256)         public  nonces;
 
     // ─── Events ──────────────────────────────────────────────────────────────
 
     event RecoveryConfigured(address indexed vault, address[] guardians, uint256 threshold);
-    event RecoveryInitiated(address indexed vault, address indexed newOwner, uint256 executeAfter);
-    event RecoveryApproved(address indexed vault, address indexed guardian, uint256 approvalCount);
-    event RecoveryExecuted(address indexed vault, address indexed newOwner);
-    event RecoveryVetoed(address indexed vault, address indexed vetoer);
+    event OwnershipRecoveryInitiated(address indexed vault, address indexed newOwner, uint256 executeAfter, uint256 sigCount);
+    event GuardianRecoveryInitiated(address indexed vault, address indexed newGuardian, uint256 executeAfter, uint256 sigCount);
+    event OwnershipRecoveryExecuted(address indexed vault, address indexed newOwner);
+    event GuardianRecoveryExecuted(address indexed vault, address indexed newGuardian);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -73,20 +84,24 @@ contract SocialRecoveryModule is IRecovery {
     error NoConfig();
     error RecoveryAlreadyActive();
     error RecoveryNotActive();
-    error AlreadyApproved();
+    error RecoveryExpired();
     error DelayNotElapsed();
-    error ThresholdNotMet();
+    error NotGuardian();
+    error DuplicateSigner();
+    error InsufficientSignatures();
+
+    // ─── Constructor ─────────────────────────────────────────────────────────
+
+    constructor() EIP712("Chroma Social Recovery", "1") {}
 
     // ─── Config ──────────────────────────────────────────────────────────────
 
     /**
      * @notice Sets the guardian set and approval threshold for a vault.
-     * @dev Only the vault owner can configure recovery. Should be called well before
-     *      key loss; guardians should be trusted contacts who do not know each other
-     *      to prevent collusion (per Vitalik's social recovery design).
+     * @dev Only the current vault owner can configure. Should be called during vault setup.
      * @param vault     The vault to configure.
-     * @param guardians Up to {MAX_GUARDIANS} unique non-zero guardian addresses.
-     * @param threshold Number of approvals required (min {MIN_THRESHOLD}).
+     * @param guardians 2–5 unique, non-zero guardian addresses.
+     * @param threshold Number of guardian signatures required (min 2).
      */
     function setRecoveryConfig(
         address vault,
@@ -94,13 +109,13 @@ contract SocialRecoveryModule is IRecovery {
         uint256 threshold
     ) external override {
         if (IVault(vault).owner() != msg.sender) revert Unauthorized();
-        if (guardians.length == 0 || guardians.length > MAX_GUARDIANS) revert InvalidConfig();
+        if (guardians.length < 2 || guardians.length > MAX_GUARDIANS) revert InvalidConfig();
         if (threshold < MIN_THRESHOLD || threshold > guardians.length) revert InvalidConfig();
 
         for (uint256 i = 0; i < guardians.length; i++) {
             if (guardians[i] == address(0)) revert ZeroAddress();
             for (uint256 j = i + 1; j < guardians.length; j++) {
-                if (guardians[i] == guardians[j]) revert InvalidConfig(); // no duplicates
+                if (guardians[i] == guardians[j]) revert InvalidConfig();
             }
         }
 
@@ -108,110 +123,114 @@ contract SocialRecoveryModule is IRecovery {
         emit RecoveryConfigured(vault, guardians, threshold);
     }
 
-    // ─── Recovery flow ───────────────────────────────────────────────────────
+    // ─── Recovery execution ──────────────────────────────────────────────────
 
     /**
-     * @notice A registered guardian initiates recovery for a vault.
-     * @dev Bumps the nonce, invalidating any approvals from a previous attempt.
-     *      The initiating guardian's approval is recorded automatically.
-     * @param vault    The vault to recover.
-     * @param newOwner The proposed new owner. Cannot be address(0).
+     * @notice Initiates ownership transfer by submitting threshold-many guardian signatures.
+     * @dev Signatures must be EIP-712 OwnershipRecovery structs for the current nonce.
+     *      Starts a 48-hour delay before {finalizeRecovery} can be called.
+     *      Cannot be called while another recovery is active (unless the active one expired).
+     * @param vault      The vault to recover.
+     * @param newOwner   Proposed new vault owner. Cannot be address(0).
+     * @param signatures Guardian EIP-712 signatures (at least threshold-many, no duplicates).
+     * @return executeAfter Timestamp when finalization becomes available.
      */
-    function initiateRecovery(address vault, address newOwner) external override {
+    function executeOwnershipRecovery(
+        address vault,
+        address newOwner,
+        bytes[] calldata signatures
+    ) external override returns (uint256 executeAfter) {
         if (newOwner == address(0)) revert ZeroAddress();
-        if (!_isGuardian(vault, msg.sender)) revert Unauthorized();
-
-        RecoveryRequest storage req = requests[vault];
-        if (req.newOwner != address(0) && !req.executed && !req.vetoed) revert RecoveryAlreadyActive();
-
-        uint256 nonce = _nonces[vault] + 1;
-        _nonces[vault] = nonce;
-
-        requests[vault] = RecoveryRequest({
-            newOwner:      newOwner,
-            requestTime:   block.timestamp,
-            approvalCount: 1,
-            executed:      false,
-            vetoed:        false
-        });
-
-        _approvals[vault][nonce][msg.sender] = true;
-
-        emit RecoveryInitiated(vault, newOwner, block.timestamp + TIMELOCK_PERIOD);
-        emit RecoveryApproved(vault, msg.sender, 1);
-    }
-
-    /**
-     * @notice A registered guardian approves the active recovery request.
-     * @dev Each guardian can only vote once per recovery attempt (tracked via nonce).
-     * @param vault The vault with an active recovery request.
-     */
-    function approveRecovery(address vault) external override {
-        if (!_isGuardian(vault, msg.sender)) revert Unauthorized();
-
-        RecoveryRequest storage req = requests[vault];
-        if (req.newOwner == address(0) || req.executed || req.vetoed) revert RecoveryNotActive();
-
-        uint256 nonce = _nonces[vault];
-        if (_approvals[vault][nonce][msg.sender]) revert AlreadyApproved();
-
-        _approvals[vault][nonce][msg.sender] = true;
-        req.approvalCount += 1;
-
-        emit RecoveryApproved(vault, msg.sender, req.approvalCount);
-    }
-
-    /**
-     * @notice Executes ownership transfer after the timelock and threshold are satisfied.
-     * @dev Can be called by anyone once conditions are met, but typically called by a guardian.
-     *      Calls {IVault.transferOwnership} which the vault permits from its registered recoveryModule.
-     * @param vault The vault to finalize recovery for.
-     * @return success  Always true on success (reverts on failure).
-     * @return newOwner The new vault owner address.
-     */
-    function executeRecovery(address vault) external override returns (bool success, address newOwner) {
-        RecoveryRequest storage req = requests[vault];
-        if (req.newOwner == address(0) || req.executed || req.vetoed) revert RecoveryNotActive();
-        if (block.timestamp < req.requestTime + TIMELOCK_PERIOD) revert DelayNotElapsed();
 
         RecoveryConfig storage config = _configs[vault];
-        if (req.approvalCount < config.threshold) revert ThresholdNotMet();
+        if (config.guardians.length == 0) revert NoConfig();
+        if (signatures.length < config.threshold) revert InsufficientSignatures();
 
-        req.executed = true;
-        newOwner = req.newOwner;
+        _requireNoActiveRecovery(vault);
 
-        IVault(vault).transferOwnership(newOwner);
+        uint256 nonce = nonces[vault];
+        _verifySignatures(vault, newOwner, nonce, OWNERSHIP_RECOVERY_TYPEHASH, signatures);
 
-        emit RecoveryExecuted(vault, newOwner);
-        return (true, newOwner);
+        executeAfter = block.timestamp + TIMELOCK_PERIOD;
+        requests[vault] = RecoveryRequest({
+            action:        RecoveryAction.TRANSFER_OWNERSHIP,
+            targetAddress: newOwner,
+            executeAfter:  executeAfter,
+            nonce:         nonce,
+            executed:      false
+        });
+
+        emit OwnershipRecoveryInitiated(vault, newOwner, executeAfter, signatures.length);
     }
 
     /**
-     * @notice Current vault owner vetoes (cancels) the active recovery request.
-     * @dev The owner has the full 48-hour timelock window to identify and cancel
-     *      a fraudulent recovery attempt initiated by a compromised guardian.
-     * @param vault The vault whose active recovery to cancel.
+     * @notice Initiates guardian replacement by submitting threshold-many guardian signatures.
+     * @dev Signatures must be EIP-712 GuardianRecovery structs for the current nonce.
+     *      Starts a 48-hour delay before {finalizeRecovery} can be called.
+     * @param vault        The vault whose guardian to replace.
+     * @param newGuardian  Proposed new guardian address. Cannot be address(0).
+     * @param signatures   Guardian EIP-712 signatures (at least threshold-many, no duplicates).
+     * @return executeAfter Timestamp when finalization becomes available.
      */
-    function vetoRecovery(address vault) external override {
-        if (IVault(vault).owner() != msg.sender) revert Unauthorized();
+    function executeGuardianRecovery(
+        address vault,
+        address newGuardian,
+        bytes[] calldata signatures
+    ) external override returns (uint256 executeAfter) {
+        if (newGuardian == address(0)) revert ZeroAddress();
 
+        RecoveryConfig storage config = _configs[vault];
+        if (config.guardians.length == 0) revert NoConfig();
+        if (signatures.length < config.threshold) revert InsufficientSignatures();
+
+        _requireNoActiveRecovery(vault);
+
+        uint256 nonce = nonces[vault];
+        _verifySignatures(vault, newGuardian, nonce, GUARDIAN_RECOVERY_TYPEHASH, signatures);
+
+        executeAfter = block.timestamp + TIMELOCK_PERIOD;
+        requests[vault] = RecoveryRequest({
+            action:        RecoveryAction.SET_GUARDIAN,
+            targetAddress: newGuardian,
+            executeAfter:  executeAfter,
+            nonce:         nonce,
+            executed:      false
+        });
+
+        emit GuardianRecoveryInitiated(vault, newGuardian, executeAfter, signatures.length);
+    }
+
+    /**
+     * @notice Finalizes the active recovery request after the 48-hour delay.
+     * @dev Callable by anyone once the delay has elapsed.
+     *      Reverts if the request has expired (older than 7 days past the unlock time).
+     *      Increments the vault nonce on success, invalidating all prior guardian signatures.
+     * @param vault The vault to finalize recovery for.
+     */
+    function finalizeRecovery(address vault) external override {
         RecoveryRequest storage req = requests[vault];
-        if (req.newOwner == address(0) || req.executed || req.vetoed) revert RecoveryNotActive();
+        if (req.targetAddress == address(0)) revert RecoveryNotActive();
+        if (req.executed) revert RecoveryNotActive();
+        if (block.timestamp < req.executeAfter) revert DelayNotElapsed();
+        if (block.timestamp > req.executeAfter + MAX_RECOVERY_DURATION) revert RecoveryExpired();
 
-        req.vetoed = true;
-        emit RecoveryVetoed(vault, msg.sender);
+        req.executed = true;
+        nonces[vault]++;
+
+        if (req.action == RecoveryAction.TRANSFER_OWNERSHIP) {
+            IVault(vault).transferOwnership(req.targetAddress);
+            emit OwnershipRecoveryExecuted(vault, req.targetAddress);
+        } else {
+            IVault(vault).setGuardianAddress(req.targetAddress);
+            emit GuardianRecoveryExecuted(vault, req.targetAddress);
+        }
     }
 
     // ─── Views ───────────────────────────────────────────────────────────────
 
-    /// @notice Returns whether `guardian` is registered as a guardian for `vault`.
+    /// @notice Returns whether `guardian` is registered for `vault`.
     function isGuardian(address vault, address guardian) external view override returns (bool) {
         return _isGuardian(vault, guardian);
-    }
-
-    /// @notice Returns whether `guardian` has already approved the current active recovery.
-    function hasApproved(address vault, address guardian) external view returns (bool) {
-        return _approvals[vault][_nonces[vault]][guardian];
     }
 
     /// @notice Returns the full recovery config for a vault.
@@ -220,27 +239,64 @@ contract SocialRecoveryModule is IRecovery {
         return (config.guardians, config.threshold);
     }
 
-    /// @notice Returns a snapshot of the active recovery request state.
+    /// @notice Returns a snapshot of the active recovery request.
     function getRecoveryStatus(address vault) external view returns (
-        address newOwner,
-        uint256 requestTime,
-        uint256 executeAfter,
-        uint256 approvalCount,
-        bool    executed,
-        bool    vetoed
+        RecoveryAction action,
+        address        targetAddress,
+        uint256        executeAfter,
+        bool           executed,
+        bool           expired
     ) {
         RecoveryRequest storage req = requests[vault];
-        return (
-            req.newOwner,
-            req.requestTime,
-            req.requestTime + TIMELOCK_PERIOD,
-            req.approvalCount,
-            req.executed,
-            req.vetoed
-        );
+        bool isExpired = req.targetAddress != address(0) &&
+            !req.executed &&
+            block.timestamp > req.executeAfter + MAX_RECOVERY_DURATION;
+        return (req.action, req.targetAddress, req.executeAfter, req.executed, isExpired);
+    }
+
+    /// @notice Returns the EIP-712 domain separator.
+    function getDomainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
     }
 
     // ─── Internal ────────────────────────────────────────────────────────────
+
+    /// @dev Reverts if there is an active (non-expired, non-executed) recovery request.
+    function _requireNoActiveRecovery(address vault) internal view {
+        RecoveryRequest storage req = requests[vault];
+        bool canOverride = req.targetAddress == address(0) ||
+            req.executed ||
+            block.timestamp > req.executeAfter + MAX_RECOVERY_DURATION;
+        if (!canOverride) revert RecoveryAlreadyActive();
+    }
+
+    /**
+     * @dev Verifies that `signatures` contains at least threshold unique valid guardian signatures
+     *      for the EIP-712 struct (typehash, vault, target, nonce). Reverts on any failure.
+     */
+    function _verifySignatures(
+        address vault,
+        address target,
+        uint256 nonce,
+        bytes32 typehash,
+        bytes[] calldata signatures
+    ) internal view {
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(typehash, vault, target, nonce))
+        );
+        address[] memory signers = new address[](signatures.length);
+
+        for (uint256 i = 0; i < signatures.length; i++) {
+            address signer = ECDSA.recover(digest, signatures[i]);
+            if (!_isGuardian(vault, signer)) revert NotGuardian();
+
+            for (uint256 j = 0; j < i; j++) {
+                if (signers[j] == signer) revert DuplicateSigner();
+            }
+
+            signers[i] = signer;
+        }
+    }
 
     function _isGuardian(address vault, address candidate) internal view returns (bool) {
         address[] storage guardians = _configs[vault].guardians;

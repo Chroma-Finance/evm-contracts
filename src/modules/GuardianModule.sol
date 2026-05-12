@@ -39,11 +39,19 @@ contract GuardianModule is IGuardian, EIP712, Ownable {
 
     /**
      * @notice Set guardian for a vault (or disable by setting address(0)).
-     * @dev Only vault owner can call this function.
+     * @dev Callable by the vault owner directly, or by the vault contract itself.
+     *      The vault checks its own authorization before calling (e.g. from setGuardianAddress),
+     *      so msg.sender == vault is treated as a pre-authorized call.
      * @param vault    The vault address
      * @param guardian The guardian address (or address(0) to disable)
      */
     function setGuardian(address vault, address guardian) external {
+        if (msg.sender == vault) {
+            // Vault has already checked authorization internally (owner or recoveryModule).
+            guardians[vault] = guardian;
+            emit GuardianSet(vault, guardian);
+            return;
+        }
         if (IVault(vault).owner() != msg.sender) revert Unauthorized();
         guardians[vault] = guardian;
         emit GuardianSet(vault, guardian);

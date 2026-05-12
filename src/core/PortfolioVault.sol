@@ -117,6 +117,7 @@ contract PortfolioVault is ReentrancyGuard {
     event GuardianModuleSet(address indexed guardian);
     event RecoveryModuleSet(address indexed recovery);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event GuardianAddressUpdated(address indexed newGuardian);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -539,6 +540,17 @@ contract PortfolioVault is ReentrancyGuard {
         if (newOwner == address(0)) revert ZeroAddress();
         emit OwnershipTransferred(vaultOwner, newOwner);
         vaultOwner = newOwner;
+    }
+
+    /**
+     * @notice Updates the guardian address registered in the guardian module.
+     * @dev Callable by the vault owner directly or by the registered {recoveryModule}.
+     *      Allows social recovery to rotate a compromised guardian without owner wallet access.
+     */
+    function setGuardianAddress(address newGuardian) external {
+        if (msg.sender != vaultOwner && msg.sender != recoveryModule) revert Unauthorized();
+        IGuardian(guardianModule).setGuardian(address(this), newGuardian);
+        emit GuardianAddressUpdated(newGuardian);
     }
 
     /// @notice Returns the current vault owner (IVault-compatible alias for {vaultOwner}).
