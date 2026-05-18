@@ -64,9 +64,7 @@ contract MockAggregator {
     function setPrice(int256 p) external { price = p; }
     function setUpdatedAt(uint256 t) external { updatedAt = t; }
 
-    function latestRoundData() external view returns (
-        uint80, int256, uint256, uint256, uint80
-    ) {
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
         return (roundId, price, 0, updatedAt, roundId);
     }
 
@@ -75,9 +73,8 @@ contract MockAggregator {
 
 // ─── Mock Uniswap V3 SwapRouter ───────────────────────────────────────────────
 //
-// Returns a configurable ratio of tokenOut per tokenIn. Simulates a fill price.
-// The fill ratio is expressed in basis points of the "fair" oracle amount so
-// tests can trivially simulate sandwich attacks (ratio < BPS) or normal fills.
+// Returns a configurable ratio of tokenOut per tokenIn. fillBps=10000 = oracle price,
+// 9950 = 0.5% slippage, 9800 = 2% slippage (exceeds MAX_SLIPPAGE_BPS).
 
 struct ExactInputSingleParams {
     address tokenIn;
@@ -91,45 +88,31 @@ struct ExactInputSingleParams {
 }
 
 contract MockUniswapRouter {
-    // fillBps: 10000 = fill exactly at oracle price, 9950 = 0.5% slippage, 9900 = 1% slippage
     uint256 public fillBps = 10_000;
-
-    // Minted-to-recipient token amount on the last call (for assertions)
     uint256 public lastAmountOut;
 
     function setFillBps(uint256 bps) external { fillBps = bps; }
 
-    // Matches the ISwapRouter.ExactInputSingleParams struct layout.
     function exactInputSingle(ExactInputSingleParams calldata params)
-        external
-        returns (uint256 amountOut)
+        external returns (uint256 amountOut)
     {
-        // Pull tokenIn from caller (SwapRouter contract)
         MockERC20(params.tokenIn).transferFrom(msg.sender, address(this), params.amountIn);
-
-        // Compute fill amount: amountIn * fillBps / 10000
-        // (the oracle-expected amount has already been captured in amountOutMinimum by SwapRouter)
-        // We use amountOutMinimum as the "oracle fair price" base and scale by fillBps.
-        // That way: fillBps=10000 → exact oracle amount, <9950 → slippage exceeds 0.5%.
         amountOut = params.amountOutMinimum * fillBps / 10_000;
-
         require(amountOut >= params.amountOutMinimum, "MockRouter: slippage");
-
-        // Mint output token to recipient
         MockERC20(params.tokenOut).mint(params.recipient, amountOut);
         lastAmountOut = amountOut;
     }
 }
 
-// ─── Test suite ───────────────────────────────────────────────────────────────
+// ─── SwapRouter unit tests ────────────────────────────────────────────────────
 
 contract SwapRouterTest is Test {
     SwapRouter        internal router;
     MockUniswapRouter internal mockDex;
 
-    MockERC20 internal usdc; // 6 dec, price $1
-    MockERC20 internal wbtc; // 8 dec, price $60 000
-    MockERC20 internal weth; // 18 dec, price $3 000
+    MockERC20 internal usdc;
+    MockERC20 internal wbtc;
+    MockERC20 internal weth;
 
     MockAggregator internal usdcFeed;
     MockAggregator internal wbtcFeed;
@@ -139,17 +122,17 @@ contract SwapRouterTest is Test {
     address internal vault = makeAddr("vault");
     address internal user  = makeAddr("user");
 
-    int256 constant USDC_PRICE = 1e8;        // $1.00
-    int256 constant WBTC_PRICE = 60_000e8;   // $60 000
-    int256 constant WETH_PRICE = 3_000e8;    // $3 000
+    int256 constant USDC_PRICE = 1e8;
+    int256 constant WBTC_PRICE = 60_000e8;
+    int256 constant WETH_PRICE = 3_000e8;
 
     function setUp() public {
-        mockDex  = new MockUniswapRouter();
-        router   = new SwapRouter(address(mockDex));
+        mockDex = new MockUniswapRouter();
+        router  = new SwapRouter(address(mockDex));
 
-        usdc = new MockERC20("USD Coin",      "USDC", 6);
-        wbtc = new MockERC20("Wrapped BTC",   "WBTC", 8);
-        weth = new MockERC20("Wrapped ETH",   "WETH", 18);
+        usdc = new MockERC20("USD Coin",    "USDC", 6);
+        wbtc = new MockERC20("Wrapped BTC", "WBTC", 8);
+        weth = new MockERC20("Wrapped ETH", "WETH", 18);
 
         usdcFeed = new MockAggregator(USDC_PRICE, block.timestamp);
         wbtcFeed = new MockAggregator(WBTC_PRICE, block.timestamp);
@@ -162,27 +145,26 @@ contract SwapRouterTest is Test {
         router.setPoolFee(address(usdc), address(wbtc), 3000);
         router.setPoolFee(address(usdc), address(weth), 500);
 
-        router.setAuthorizedVault(vault);
+        // Authorize the mock vault address and whitelist USDC as a deposit/withdrawal token.
+        router.authorizeVault(vault);
+        router.whitelistToken(address(usdc));
     }
 
     // ─── Oracle price logic ───────────────────────────────────────────────────
 
     function test_getExpectedOutput_usdcToWbtc() public view {
-        // 60 000 USDC → 1 WBTC
-        uint256 amountIn  = 60_000e6; // 60 000 USDC
-        uint256 expected  = router.getExpectedOutput(address(usdc), address(wbtc), amountIn);
+        uint256 amountIn = 60_000e6;
+        uint256 expected = router.getExpectedOutput(address(usdc), address(wbtc), amountIn);
         assertEq(expected, 1e8, "60k USDC should yield 1 WBTC");
     }
 
     function test_getExpectedOutput_usdcToWeth() public view {
-        // 3 000 USDC → 1 WETH
         uint256 amountIn = 3_000e6;
         uint256 expected = router.getExpectedOutput(address(usdc), address(weth), amountIn);
         assertEq(expected, 1e18, "3k USDC should yield 1 WETH");
     }
 
     function test_getExpectedOutput_wbtcToWeth() public view {
-        // 1 WBTC ($60k) → 20 WETH ($3k each)
         uint256 amountIn = 1e8;
         uint256 expected = router.getExpectedOutput(address(wbtc), address(weth), amountIn);
         assertEq(expected, 20e18, "1 WBTC should yield 20 WETH");
@@ -192,7 +174,6 @@ contract SwapRouterTest is Test {
         uint256 amountIn = 60_000e6;
         uint256 expected = router.getExpectedOutput(address(usdc), address(wbtc), amountIn);
         uint256 minOut   = router.getMinAmountOut(address(usdc), address(wbtc), amountIn);
-        // 0.5% slippage → 99.5% of expected
         assertEq(minOut, expected * 9_950 / 10_000);
     }
 
@@ -204,7 +185,7 @@ contract SwapRouterTest is Test {
 
     function test_stalePrice_reverts() public {
         vm.warp(10_000);
-        usdcFeed.setUpdatedAt(block.timestamp); // keep USDC fresh so BTC is checked second
+        usdcFeed.setUpdatedAt(block.timestamp);
         wbtcFeed.setUpdatedAt(block.timestamp - 2 hours);
         vm.expectRevert(abi.encodeWithSelector(SwapRouter.StalePriceFeed.selector, address(wbtc)));
         router.getExpectedOutput(address(usdc), address(wbtc), 1e6);
@@ -258,11 +239,37 @@ contract SwapRouterTest is Test {
         router.swapToInputToken(tokensIn, amounts, address(usdc));
     }
 
+    // ─── Token whitelist ──────────────────────────────────────────────────────
+
+    function test_swapToPortfolio_unlistedToken_reverts() public {
+        address unlisted = makeAddr("unknown");
+        address[] memory tokensOut = new address[](1);
+        uint256[] memory amounts   = new uint256[](1);
+        tokensOut[0] = address(wbtc);
+        amounts[0]   = 1e6;
+
+        vm.prank(vault);
+        vm.expectRevert(abi.encodeWithSelector(SwapRouter.TokenNotWhitelisted.selector, unlisted));
+        router.swapToPortfolio(unlisted, tokensOut, amounts);
+    }
+
+    function test_swapToInputToken_unlistedToken_reverts() public {
+        address unlisted = makeAddr("unknown");
+        address[] memory tokensIn = new address[](1);
+        uint256[] memory amounts  = new uint256[](1);
+        tokensIn[0] = address(wbtc);
+        amounts[0]  = 1e8;
+
+        vm.prank(vault);
+        vm.expectRevert(abi.encodeWithSelector(SwapRouter.TokenNotWhitelisted.selector, unlisted));
+        router.swapToInputToken(tokensIn, amounts, unlisted);
+    }
+
     // ─── Single swap: swapExactInputSingle ───────────────────────────────────
 
     function test_swapExactInputSingle_happyPath() public {
         uint256 amountIn = 60_000e6;
-        uint256 minOut   = 0.99e8; // ~1 WBTC with 1% room
+        uint256 minOut   = 0.99e8;
         usdc.mint(user, amountIn);
 
         vm.startPrank(user);
@@ -272,9 +279,9 @@ contract SwapRouterTest is Test {
         );
         vm.stopPrank();
 
-        assertGt(amountOut, 0, "should receive WBTC");
-        assertEq(usdc.balanceOf(user), 0, "USDC spent");
-        assertGt(wbtc.balanceOf(user), 0, "WBTC received");
+        assertGt(amountOut, 0);
+        assertEq(usdc.balanceOf(user), 0);
+        assertGt(wbtc.balanceOf(user), 0);
     }
 
     function test_swapExactInputSingle_zeroAmount_reverts() public {
@@ -286,7 +293,7 @@ contract SwapRouterTest is Test {
     // ─── Batch swap: swapToPortfolio ─────────────────────────────────────────
 
     function test_swapToPortfolio_splitDeposit() public {
-        uint256 totalUsdc = 63_000e6; // 60k for WBTC + 3k for WETH
+        uint256 totalUsdc = 63_000e6;
         usdc.mint(vault, totalUsdc);
 
         address[] memory tokensOut = new address[](2);
@@ -300,10 +307,10 @@ contract SwapRouterTest is Test {
         vm.stopPrank();
 
         assertEq(outs.length, 2);
-        assertGt(outs[0], 0, "WBTC out");
-        assertGt(outs[1], 0, "WETH out");
-        assertEq(wbtc.balanceOf(vault), outs[0], "vault holds WBTC");
-        assertEq(weth.balanceOf(vault), outs[1], "vault holds WETH");
+        assertGt(outs[0], 0);
+        assertGt(outs[1], 0);
+        assertEq(wbtc.balanceOf(vault), outs[0]);
+        assertEq(weth.balanceOf(vault), outs[1]);
     }
 
     function test_swapToPortfolio_skipsZeroAmounts() public {
@@ -313,7 +320,7 @@ contract SwapRouterTest is Test {
         address[] memory tokensOut = new address[](2);
         uint256[] memory amounts   = new uint256[](2);
         tokensOut[0] = address(wbtc);  amounts[0] = totalUsdc;
-        tokensOut[1] = address(weth);  amounts[1] = 0; // skip
+        tokensOut[1] = address(weth);  amounts[1] = 0;
 
         vm.startPrank(vault);
         usdc.approve(address(router), totalUsdc);
@@ -321,15 +328,15 @@ contract SwapRouterTest is Test {
         vm.stopPrank();
 
         assertGt(outs[0], 0);
-        assertEq(outs[1], 0, "skipped zero-amount swap");
-        assertEq(weth.balanceOf(vault), 0, "no WETH minted");
+        assertEq(outs[1], 0);
+        assertEq(weth.balanceOf(vault), 0);
     }
 
     // ─── Batch swap: swapToInputToken ────────────────────────────────────────
 
     function test_swapToInputToken_batchWithdrawal() public {
-        uint256 wbtcAmount = 1e8;   // 1 WBTC
-        uint256 wethAmount = 10e18; // 10 WETH
+        uint256 wbtcAmount = 1e8;
+        uint256 wethAmount = 10e18;
         wbtc.mint(vault, wbtcAmount);
         weth.mint(vault, wethAmount);
 
@@ -344,14 +351,13 @@ contract SwapRouterTest is Test {
         uint256 totalUsdc = router.swapToInputToken(tokensIn, amounts, address(usdc));
         vm.stopPrank();
 
-        assertGt(totalUsdc, 0, "received USDC");
-        assertEq(usdc.balanceOf(vault), totalUsdc, "vault holds USDC");
+        assertGt(totalUsdc, 0);
+        assertEq(usdc.balanceOf(vault), totalUsdc);
     }
 
     // ─── Oracle slippage protection ───────────────────────────────────────────
 
     function test_swapToPortfolio_oracleBlocksSandwich() public {
-        // Set DEX fill to 98% — exceeds 0.5% max slippage → must revert
         mockDex.setFillBps(9_800);
 
         uint256 amountIn = 60_000e6;
@@ -370,9 +376,7 @@ contract SwapRouterTest is Test {
     }
 
     function test_swapToPortfolio_acceptsExactMinSlippage() public {
-        // Fill at exactly minAmountOut (0.5% below oracle) → should succeed
-        // MockRouter: fillBps=10000 fills at exactly minAmountOut (which IS 99.5%)
-        mockDex.setFillBps(10_000); // exact fill of minAmountOut
+        mockDex.setFillBps(10_000);
 
         uint256 amountIn = 60_000e6;
         usdc.mint(vault, amountIn);
@@ -397,7 +401,7 @@ contract SwapRouterTest is Test {
 
         address[] memory tokensOut = new address[](1);
         uint256[] memory amounts   = new uint256[](1);
-        tokensOut[0] = address(usdc); // same as tokenIn
+        tokensOut[0] = address(usdc);
         amounts[0]   = 1e6;
 
         vm.startPrank(vault);
@@ -425,26 +429,22 @@ contract VaultSwapIntegrationTest is Test {
     MockAggregator internal wbtcFeed;
     MockAggregator internal wethFeed;
 
-    address internal owner        = makeAddr("owner");
+    address internal vaultOwner   = makeAddr("vaultOwner");
     address internal feeRecipient = makeAddr("feeRecipient");
-    address internal alice        = makeAddr("alice");
 
     int256 constant USDC_PRICE = 1e8;
     int256 constant WBTC_PRICE = 60_000e8;
     int256 constant WETH_PRICE = 3_000e8;
 
     function setUp() public {
-        // Tokens
         usdc = new MockERC20("USD Coin",    "USDC", 6);
         wbtc = new MockERC20("Wrapped BTC", "WBTC", 8);
         weth = new MockERC20("Wrapped ETH", "WETH", 18);
 
-        // Oracle feeds
         usdcFeed = new MockAggregator(USDC_PRICE, block.timestamp);
         wbtcFeed = new MockAggregator(WBTC_PRICE, block.timestamp);
         wethFeed = new MockAggregator(WETH_PRICE, block.timestamp);
 
-        // Dex + router
         mockDex = new MockUniswapRouter();
         router  = new SwapRouter(address(mockDex));
 
@@ -455,7 +455,9 @@ contract VaultSwapIntegrationTest is Test {
         router.setPoolFee(address(usdc), address(weth), 500);
         router.setPoolFee(address(wbtc), address(weth), 3000);
 
-        // Registry + factory
+        // Whitelist USDC as accepted deposit/withdrawal token.
+        router.whitelistToken(address(usdc));
+
         registry = new RiskTierRegistry();
 
         address[] memory assets  = new address[](2);
@@ -465,27 +467,27 @@ contract VaultSwapIntegrationTest is Test {
         assets[1] = address(weth);  weights[1] = 5_000;  feeds[1] = address(wethFeed);
         registry.createTier(0, "Test Tier", assets, weights, feeds);
 
-        factory = new VaultFactory(address(usdc), address(registry), feeRecipient);
+        // Factory wires the router into every new vault and authorizes it.
+        factory = new VaultFactory(address(router), address(registry), feeRecipient);
 
-        vm.prank(owner);
+        // Factory calls router.authorizeVault() on each new vault — factory must own the router.
+        router.transferOwnership(address(factory));
+
+        vm.prank(vaultOwner);
         address vaultAddr = factory.createVault(0, false);
         vault = PortfolioVault(vaultAddr);
-
-        // Wire swap router
-        vm.prank(owner);
-        vault.setSwapRouter(address(router));
-        router.setAuthorizedVault(address(vault));
+        // vault.swapRouter is set and router.authorizedVaults[vault] == true automatically.
     }
 
-    // ─── Deposit flow ─────────────────────────────────────────────────────────
+    // ─── Deposit ──────────────────────────────────────────────────────────────
 
     function test_deposit_swapsUsdcIntoPortfolio() public {
-        uint256 depositAmount = 63_000e6; // 63k USDC
-        usdc.mint(alice, depositAmount);
+        uint256 depositAmount = 63_000e6;
+        usdc.mint(vaultOwner, depositAmount);
 
-        vm.startPrank(alice);
+        vm.startPrank(vaultOwner);
         usdc.approve(address(vault), depositAmount);
-        uint256 shares = vault.deposit(depositAmount, alice);
+        uint256 shares = vault.deposit(address(usdc), depositAmount);
         vm.stopPrank();
 
         assertGt(shares, 0, "shares minted");
@@ -498,76 +500,64 @@ contract VaultSwapIntegrationTest is Test {
         uint256 deposit1 = 60_000e6;
         uint256 deposit2 = 60_000e6;
 
-        // First depositor
-        usdc.mint(alice, deposit1);
-        vm.startPrank(alice);
-        usdc.approve(address(vault), deposit1);
-        uint256 shares1 = vault.deposit(deposit1, alice);
+        usdc.mint(vaultOwner, deposit1 + deposit2);
+        vm.startPrank(vaultOwner);
+        usdc.approve(address(vault), deposit1 + deposit2);
+
+        uint256 shares1 = vault.deposit(address(usdc), deposit1);
+        uint256 shares2 = vault.deposit(address(usdc), deposit2);
         vm.stopPrank();
 
-        // Second depositor (same amount, same prices)
-        address bob = makeAddr("bob");
-        usdc.mint(bob, deposit2);
-        vm.startPrank(bob);
-        usdc.approve(address(vault), deposit2);
-        uint256 shares2 = vault.deposit(deposit2, bob);
-        vm.stopPrank();
-
-        // Both should receive approximately equal shares
         assertApproxEqRel(shares1, shares2, 0.01e18, "shares should be proportional");
     }
 
-    // ─── Withdraw flow ────────────────────────────────────────────────────────
+    // ─── Withdraw ─────────────────────────────────────────────────────────────
 
     function test_withdraw_convertsPortfolioToUsdc() public {
-        // Deposit with swap enabled so vault holds portfolio tokens
         uint256 depositAmount = 63_000e6;
-        usdc.mint(alice, depositAmount);
-        vm.startPrank(alice);
+        usdc.mint(vaultOwner, depositAmount);
+
+        vm.startPrank(vaultOwner);
         usdc.approve(address(vault), depositAmount);
-        vault.deposit(depositAmount, alice);
+        vault.deposit(address(usdc), depositAmount);
+
+        uint256 shares = vault.balanceOf(vaultOwner);
+        assertGt(shares, 0);
+
+        uint256 usdcBefore = usdc.balanceOf(vaultOwner);
+        vault.withdraw(address(usdc), shares, block.timestamp, new bytes(0));
         vm.stopPrank();
 
-        assertGt(vault.balanceOf(alice), 0, "alice has shares");
-        assertEq(usdc.balanceOf(address(vault)), 0, "vault holds no USDC");
-        assertGt(wbtc.balanceOf(address(vault)), 0, "vault holds WBTC");
-        assertGt(weth.balanceOf(address(vault)), 0, "vault holds WETH");
-
-        // withdrawAll converts portfolio back to USDC
-        uint256 usdcBefore = usdc.balanceOf(alice);
-        vm.prank(alice);
-        vault.withdrawAll();
-
-        assertGt(usdc.balanceOf(alice) - usdcBefore, 0, "alice received USDC");
-        assertEq(vault.balanceOf(alice), 0, "shares burned");
+        assertGt(usdc.balanceOf(vaultOwner) - usdcBefore, 0, "received USDC");
+        assertEq(vault.balanceOf(vaultOwner), 0, "shares burned");
     }
 
-    // ─── No swap router: backward compatibility ───────────────────────────────
+    // ─── No router: deposit reverts ───────────────────────────────────────────
 
-    function test_deposit_noRouter_holdsUsdc() public {
-        vm.prank(owner);
-        vault.setSwapRouter(address(0));
+    function test_deposit_noRouter_reverts() public {
+        // Create a vault via a factory with no swapRouter set.
+        VaultFactory noRouterFactory = new VaultFactory(address(0), address(registry), feeRecipient);
+        vm.prank(vaultOwner);
+        address noRouterVault = noRouterFactory.createVault(0, false);
 
-        uint256 depositAmount = 1_000e6;
-        usdc.mint(alice, depositAmount);
-
-        vm.startPrank(alice);
-        usdc.approve(address(vault), depositAmount);
-        vault.deposit(depositAmount, alice);
+        usdc.mint(vaultOwner, 1_000e6);
+        vm.startPrank(vaultOwner);
+        usdc.approve(noRouterVault, 1_000e6);
+        vm.expectRevert(PortfolioVault.SwapRouterRequired.selector);
+        PortfolioVault(noRouterVault).deposit(address(usdc), 1_000e6);
         vm.stopPrank();
-
-        assertEq(usdc.balanceOf(address(vault)), depositAmount, "vault holds USDC when no router");
     }
 
     // ─── SwapRouter access control via vault ─────────────────────────────────
 
     function test_routerRejects_directCallerNotVault() public {
+        address stranger = makeAddr("stranger");
         address[] memory tokensOut = new address[](1);
         uint256[] memory amounts   = new uint256[](1);
         tokensOut[0] = address(wbtc);
         amounts[0]   = 1_000e6;
 
-        vm.prank(alice);
+        vm.prank(stranger);
         vm.expectRevert(SwapRouter.Unauthorized.selector);
         router.swapToPortfolio(address(usdc), tokensOut, amounts);
     }

@@ -6,60 +6,96 @@ import {EventNotifier} from "../../src/core/EventNotifier.sol";
 import {VaultFactory} from "../../src/core/VaultFactory.sol";
 import {PortfolioVault} from "../../src/core/PortfolioVault.sol";
 import {RiskTierRegistry} from "../../src/utils/RiskTierRegistry.sol";
+import {IChromaSwapRouter} from "../../src/interfaces/ISwapRouter.sol";
+
+// ─── Mock ERC-20 ─────────────────────────────────────────────────────────────
 
 contract MockERC20 {
-    string public name     = "Mock USDC";
-    string public symbol   = "USDC";
-    uint8  public decimals = 6;
+    string  public name;
+    string  public symbol;
+    uint8   public decimals;
     uint256 public totalSupply;
-
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
-
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
+    constructor(string memory n, string memory s, uint8 d) { name = n; symbol = s; decimals = d; }
+
     function mint(address to, uint256 amount) external {
-        totalSupply += amount;
-        balanceOf[to] += amount;
-        emit Transfer(address(0), to, amount);
+        totalSupply += amount; balanceOf[to] += amount; emit Transfer(address(0), to, amount);
     }
-
     function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
-        return true;
+        allowance[msg.sender][spender] = amount; emit Approval(msg.sender, spender, amount); return true;
     }
-
     function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        emit Transfer(msg.sender, to, amount);
-        return true;
+        balanceOf[msg.sender] -= amount; balanceOf[to] += amount; emit Transfer(msg.sender, to, amount); return true;
     }
-
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        emit Transfer(from, to, amount);
-        return true;
+        allowance[from][msg.sender] -= amount; balanceOf[from] -= amount; balanceOf[to] += amount;
+        emit Transfer(from, to, amount); return true;
     }
 }
 
+// ─── Mock Chainlink aggregator ($1 price) ────────────────────────────────────
+
+contract MockAggregator {
+    uint80 public roundId = 1;
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (roundId, 1e8, 0, block.timestamp, roundId);
+    }
+}
+
+// ─── Mock SwapRouter ──────────────────────────────────────────────────────────
+
+contract MockSwapRouter is IChromaSwapRouter {
+    function swapToPortfolio(
+        address tokenIn,
+        address[] calldata tokensOut,
+        uint256[] calldata amountsIn
+    ) external returns (uint256[] memory amountsOut) {
+        uint256 total;
+        for (uint256 i = 0; i < amountsIn.length; i++) total += amountsIn[i];
+        MockERC20(tokenIn).transferFrom(msg.sender, address(this), total);
+        amountsOut = new uint256[](tokensOut.length);
+        for (uint256 i = 0; i < tokensOut.length; i++) {
+            amountsOut[i] = amountsIn[i];
+            if (amountsIn[i] > 0) MockERC20(tokensOut[i]).mint(msg.sender, amountsIn[i]);
+        }
+    }
+
+    function swapToInputToken(
+        address[] calldata tokensIn,
+        uint256[] calldata amountsIn,
+        address tokenOut
+    ) external returns (uint256 totalOut) {
+        for (uint256 i = 0; i < tokensIn.length; i++) {
+            if (amountsIn[i] == 0) continue;
+            MockERC20(tokensIn[i]).transferFrom(msg.sender, address(this), amountsIn[i]);
+            MockERC20(tokenOut).mint(msg.sender, amountsIn[i]);
+            totalOut += amountsIn[i];
+        }
+    }
+
+    function authorizeVault(address) external {}
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
 contract EventNotifierTest is Test {
-    // Mirror EventNotifier events so Forge can match them in expectEmit.
+    // Mirror EventNotifier events for vm.expectEmit
     event Deposited(address indexed user, address indexed vault, uint8 indexed tier, uint256 assets, uint256 shares, uint256 vaultTotalAssets, uint256 timestamp);
     event Withdrawn(address indexed user, address indexed vault, uint8 indexed tier, uint256 assets, uint256 shares, uint256 vaultTotalAssets, uint256 timestamp);
     event ManagementFeeAccrued(address indexed vault, uint8 indexed tier, uint256 feeShares, uint256 vaultTotalAssets, uint256 timestamp);
     event PerformanceFeeCharged(address indexed vault, uint8 indexed tier, address indexed user, uint256 feeAssets, uint256 vaultTotalAssets, uint256 timestamp);
     event VaultCreated(address indexed user, address indexed vault, uint8 indexed tier, uint256 timestamp);
-    // Mirror ERC-4626 Deposit event from PortfolioVault.
-    event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
+    // Mirror vault Deposit event (not ERC-4626; vault uses owner + inputToken)
+    event Deposit(address indexed owner, address indexed inputToken, uint256 amount, uint256 shares);
 
     EventNotifier    internal notifier;
     VaultFactory     internal factory;
     RiskTierRegistry internal registry;
+    MockSwapRouter   internal router;
     MockERC20        internal usdc;
 
     address internal feeRecipient = makeAddr("feeRecipient");
@@ -67,44 +103,72 @@ contract EventNotifierTest is Test {
     address internal userB        = makeAddr("userB");
     address internal attacker     = makeAddr("attacker");
 
-    address internal WBTC  = makeAddr("WBTC");
-    address internal WETH  = makeAddr("WETH");
-    address internal XAUT  = makeAddr("XAUT");
-    address internal PAXG  = makeAddr("PAXG");
-    address internal STETH = makeAddr("stETH");
-    address internal ALTS  = makeAddr("ALTS");
+    // Real MockERC20 portfolio tokens so totalAssets() resolves correctly.
+    MockERC20 internal WBTC;
+    MockERC20 internal WETH;
+    MockERC20 internal XAUT;
+    MockERC20 internal PAXG;
+    MockERC20 internal STETH;
 
-    address internal FEED_WBTC  = makeAddr("feed_wbtc");
-    address internal FEED_WETH  = makeAddr("feed_weth");
-    address internal FEED_XAUT  = makeAddr("feed_xaut");
-    address internal FEED_PAXG  = makeAddr("feed_paxg");
-    address internal FEED_STETH = makeAddr("feed_steth");
-    address internal FEED_ALTS  = makeAddr("feed_alts");
+    MockAggregator internal feedWbtc;
+    MockAggregator internal feedWeth;
+    MockAggregator internal feedXaut;
+    MockAggregator internal feedPaxg;
+    MockAggregator internal feedSteth;
 
     function setUp() public {
-        usdc     = new MockERC20();
+        usdc  = new MockERC20("USD Coin", "USDC", 6);
+        WBTC  = new MockERC20("Wrapped BTC",  "WBTC",  6);
+        WETH  = new MockERC20("Wrapped ETH",  "WETH",  6);
+        XAUT  = new MockERC20("Tether Gold",  "XAUT",  6);
+        PAXG  = new MockERC20("PAX Gold",     "PAXG",  6);
+        STETH = new MockERC20("Staked ETH",   "stETH", 6);
+
+        feedWbtc  = new MockAggregator();
+        feedWeth  = new MockAggregator();
+        feedXaut  = new MockAggregator();
+        feedPaxg  = new MockAggregator();
+        feedSteth = new MockAggregator();
+
+        router   = new MockSwapRouter();
         registry = new RiskTierRegistry();
 
-        address[] memory t0Assets  = new address[](3);
-        uint256[] memory t0Weights = new uint256[](3);
-        address[] memory t0Feeds   = new address[](3);
-        t0Assets[0] = WBTC;  t0Weights[0] = 4_000; t0Feeds[0] = FEED_WBTC;
-        t0Assets[1] = XAUT;  t0Weights[1] = 3_000; t0Feeds[1] = FEED_XAUT;
-        t0Assets[2] = PAXG;  t0Weights[2] = 3_000; t0Feeds[2] = FEED_PAXG;
-        registry.createTier(0, "Low Risk", t0Assets, t0Weights, t0Feeds);
+        // Tier 0 — Low Risk: 40% WBTC | 30% XAUT | 30% PAXG
+        {
+            address[] memory t = new address[](3);
+            uint256[] memory w = new uint256[](3);
+            address[] memory f = new address[](3);
+            t[0] = address(WBTC);  w[0] = 4_000; f[0] = address(feedWbtc);
+            t[1] = address(XAUT);  w[1] = 3_000; f[1] = address(feedXaut);
+            t[2] = address(PAXG);  w[2] = 3_000; f[2] = address(feedPaxg);
+            registry.createTier(0, "Low Risk", t, w, f);
+        }
 
-        address[] memory t1Assets  = new address[](5);
-        uint256[] memory t1Weights = new uint256[](5);
-        address[] memory t1Feeds   = new address[](5);
-        t1Assets[0] = WBTC;  t1Weights[0] = 2_500; t1Feeds[0] = FEED_WBTC;
-        t1Assets[1] = WETH;  t1Weights[1] = 2_500; t1Feeds[1] = FEED_WETH;
-        t1Assets[2] = XAUT;  t1Weights[2] = 2_000; t1Feeds[2] = FEED_XAUT;
-        t1Assets[3] = PAXG;  t1Weights[3] = 2_000; t1Feeds[3] = FEED_PAXG;
-        t1Assets[4] = STETH; t1Weights[4] = 1_000; t1Feeds[4] = FEED_STETH;
-        registry.createTier(1, "Medium Risk", t1Assets, t1Weights, t1Feeds);
+        // Tier 1 — Medium Risk: 25% WBTC | 25% WETH | 20% XAUT | 20% PAXG | 10% STETH
+        {
+            address[] memory t = new address[](5);
+            uint256[] memory w = new uint256[](5);
+            address[] memory f = new address[](5);
+            t[0] = address(WBTC);  w[0] = 2_500; f[0] = address(feedWbtc);
+            t[1] = address(WETH);  w[1] = 2_500; f[1] = address(feedWeth);
+            t[2] = address(XAUT);  w[2] = 2_000; f[2] = address(feedXaut);
+            t[3] = address(PAXG);  w[3] = 2_000; f[3] = address(feedPaxg);
+            t[4] = address(STETH); w[4] = 1_000; f[4] = address(feedSteth);
+            registry.createTier(1, "Medium Risk", t, w, f);
+        }
 
-        factory  = new VaultFactory(address(usdc), address(registry), feeRecipient);
+        factory  = new VaultFactory(address(router), address(registry), feeRecipient);
         notifier = EventNotifier(factory.eventNotifier());
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    function _deposit(address vaultAddr, address depositor, uint256 amount) internal {
+        usdc.mint(depositor, amount);
+        vm.startPrank(depositor);
+        usdc.approve(vaultAddr, amount);
+        PortfolioVault(vaultAddr).deposit(address(usdc), amount);
+        vm.stopPrank();
     }
 
     // ─── Access control unit tests ───────────────────────────────────────────
@@ -181,25 +245,25 @@ contract EventNotifierTest is Test {
     // ─── VaultFactory integration ────────────────────────────────────────────
 
     function test_factory_deploysEventNotifier() public view {
-        assertTrue(factory.eventNotifier() != address(0), "EventNotifier not deployed");
+        assertTrue(factory.eventNotifier() != address(0));
     }
 
     function test_factory_ownedByFactory() public view {
-        assertEq(notifier.owner(), address(factory), "EventNotifier owner should be factory");
+        assertEq(notifier.owner(), address(factory));
     }
 
     function test_factory_selfAuthorized() public view {
-        assertTrue(notifier.authorized(address(factory)), "Factory should be authorized");
+        assertTrue(notifier.authorized(address(factory)));
     }
 
     function test_factory_authorizesVaultOnCreation() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
-        assertTrue(notifier.authorized(vault), "Vault should be authorized after creation");
+        assertTrue(notifier.authorized(vault));
     }
 
     function test_factory_emitsVaultCreatedViaNotifier() public {
-        // Only check user (topic1) and tier (topic3); vault address (topic2) unknown before creation.
+        // Only check user (topic1) and tier (topic3); vault address unknown before creation.
         vm.expectEmit(true, false, true, false, address(notifier));
         emit VaultCreated(userA, address(0), 0, 0);
 
@@ -220,25 +284,28 @@ contract EventNotifierTest is Test {
         assertTrue(notifier.authorized(vaultB0));
     }
 
-    // ─── Deposit event integration tests ─────────────────────────────────────
+    // ─── Deposit event integration ───────────────────────────────────────────
+    //
+    // All portfolio tokens priced at $1 with 6 decimals:
+    //   1 token = 1e6 units; value = (1e6 * 1e8) / 1e6 = 1e8 = $1 (8-dec).
+    // 1000e6 USDC → 1000 tokens worth $1 each → totalAssets = 1000e8.
 
     function test_deposit_emitsDepositedViaNotifier() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
-        uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
+        uint256 amount          = 1_000e6;
+        uint256 expectedUsdIn   = 1_000e8; // $1000 in 8-dec
+        uint256 expectedShares  = 1_000e8; // first deposit: shares = usdIn
 
+        usdc.mint(userA, amount);
         vm.startPrank(userA);
         usdc.approve(vault, amount);
 
-        uint256 expectedShares = PortfolioVault(vault).previewDeposit(amount);
-
-        // vaultTotalAssets = totalAssets(): USDC balance scaled from 6 dec to 8 dec ($1 fallback).
         vm.expectEmit(true, true, true, true, address(notifier));
-        emit Deposited(userA, vault, 0, amount, expectedShares, amount * 100, block.timestamp);
+        emit Deposited(userA, vault, 0, expectedUsdIn, expectedShares, expectedUsdIn, block.timestamp);
 
-        PortfolioVault(vault).deposit(amount, userA);
+        PortfolioVault(vault).deposit(address(usdc), amount);
         vm.stopPrank();
     }
 
@@ -246,40 +313,40 @@ contract EventNotifierTest is Test {
         vm.prank(userA);
         address vault1 = factory.createVault(1, false);
 
-        uint256 amount = 500e6;
-        usdc.mint(userA, amount);
+        uint256 amount         = 500e6;
+        uint256 expectedUsdIn  = 500e8;
+        uint256 expectedShares = 500e8;
 
+        usdc.mint(userA, amount);
         vm.startPrank(userA);
         usdc.approve(vault1, amount);
 
-        uint256 expectedShares = PortfolioVault(vault1).previewDeposit(amount);
-
         vm.expectEmit(true, true, true, true, address(notifier));
-        emit Deposited(userA, vault1, 1, amount, expectedShares, amount * 100, block.timestamp);
+        emit Deposited(userA, vault1, 1, expectedUsdIn, expectedShares, expectedUsdIn, block.timestamp);
 
-        PortfolioVault(vault1).deposit(amount, userA);
+        PortfolioVault(vault1).deposit(address(usdc), amount);
         vm.stopPrank();
     }
 
-    // ─── Withdrawal event integration tests ──────────────────────────────────
+    // ─── Withdrawal event integration ────────────────────────────────────────
 
     function test_withdraw_emitsWithdrawnViaNotifier() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
-        uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
+        _deposit(vault, userA, 1_000e6);
+        uint256 shares = PortfolioVault(vault).balanceOf(userA); // = 1000e8
+
+        // usdValue = shares * (totalAssets+1)/(supply+1) ≈ shares for equal supply
+        uint256 expectedUsdValue  = 1_000e8;
+        uint256 expectedPostAssets = 0; // all portfolio tokens transferred out
 
         vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        PortfolioVault(vault).deposit(amount, userA);
-
-        uint256 shares = PortfolioVault(vault).previewWithdraw(amount);
-
         vm.expectEmit(true, true, true, true, address(notifier));
-        emit Withdrawn(userA, vault, 0, amount, shares, 0, block.timestamp);
+        emit Withdrawn(userA, vault, 0, expectedUsdValue, shares, expectedPostAssets, block.timestamp);
 
-        PortfolioVault(vault).withdraw(amount, userA, userA);
+        // outputToken = address(0) → direct portfolio token withdrawal; no guardian set → auto-approve
+        PortfolioVault(vault).withdraw(address(0), shares, block.timestamp, new bytes(0));
         vm.stopPrank();
     }
 
@@ -291,45 +358,41 @@ contract EventNotifierTest is Test {
         vm.prank(userB);
         address vaultMed = factory.createVault(1, false);
 
-        uint256 amountA = 1_000e6;
-        uint256 amountB = 2_000e6;
-        usdc.mint(userA, amountA);
-        usdc.mint(userB, amountB);
+        usdc.mint(userA, 1_000e6);
+        usdc.mint(userB, 2_000e6);
 
         vm.startPrank(userA);
-        usdc.approve(vaultLow, amountA);
+        usdc.approve(vaultLow, 1_000e6);
         vm.expectEmit(true, true, true, false, address(notifier));
-        emit Deposited(userA, vaultLow, 0, amountA, 0, 0, 0);
-        PortfolioVault(vaultLow).deposit(amountA, userA);
+        emit Deposited(userA, vaultLow, 0, 0, 0, 0, 0);
+        PortfolioVault(vaultLow).deposit(address(usdc), 1_000e6);
         vm.stopPrank();
 
         vm.startPrank(userB);
-        usdc.approve(vaultMed, amountB);
+        usdc.approve(vaultMed, 2_000e6);
         vm.expectEmit(true, true, true, false, address(notifier));
-        emit Deposited(userB, vaultMed, 1, amountB, 0, 0, 0);
-        PortfolioVault(vaultMed).deposit(amountB, userB);
+        emit Deposited(userB, vaultMed, 1, 0, 0, 0, 0);
+        PortfolioVault(vaultMed).deposit(address(usdc), 2_000e6);
         vm.stopPrank();
     }
 
-    // ─── Verify ERC-4626 events are still emitted ────────────────────────────
+    // ─── Vault-level Deposit event ───────────────────────────────────────────
 
-    function test_deposit_stillEmitsERC4626DepositEvent() public {
+    function test_deposit_emitsVaultDepositEvent() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
-        uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
+        uint256 amount         = 1_000e6;
+        uint256 expectedShares = 1_000e8;
 
+        usdc.mint(userA, amount);
         vm.startPrank(userA);
         usdc.approve(vault, amount);
 
-        uint256 expectedShares = PortfolioVault(vault).previewDeposit(amount);
-
-        // ERC-4626 Deposit event still emitted from vault itself.
         vm.expectEmit(true, true, false, true, vault);
-        emit Deposit(userA, userA, amount, expectedShares);
+        emit Deposit(userA, address(usdc), amount, expectedShares);
 
-        PortfolioVault(vault).deposit(amount, userA);
+        PortfolioVault(vault).deposit(address(usdc), amount);
         vm.stopPrank();
     }
 }

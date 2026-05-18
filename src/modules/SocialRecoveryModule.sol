@@ -230,7 +230,7 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
         nonces[vault]++;
 
         if (req.action == RecoveryAction.TRANSFER_OWNERSHIP) {
-            IVault(vault).transferOwnership(req.targetAddress);
+            IVault(vault).transferOwnershipFromRecovery(req.targetAddress);
             emit OwnershipRecoveryExecuted(vault, req.targetAddress);
         } else {
             IVault(vault).setGuardianAddress(req.targetAddress);

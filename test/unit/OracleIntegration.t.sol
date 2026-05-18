@@ -118,7 +118,8 @@ contract OracleIntegrationTest is Test {
         assets[1]  = address(weth);  weights[1] = 5_000;  feeds[1] = address(ethFeed);
         registry.createTier(0, "Oracle Test Tier", assets, weights, feeds);
 
-        factory = new VaultFactory(address(usdc), address(registry), feeRecipient);
+        // No swap router needed for oracle-only tests; pass address(0) to skip vault auth call.
+        factory = new VaultFactory(address(0), address(registry), feeRecipient);
 
         vm.prank(owner);
         address vaultAddr = factory.createVault(0, false);
@@ -224,32 +225,6 @@ contract OracleIntegrationTest is Test {
 
         uint256 expected = (five_eth * uint256(ETH_PRICE)) / 1e18;
         assertEq(vault.totalAssets(), expected, "Should skip zero-balance WBTC");
-    }
-
-    // ─── totalAssets: denomination asset fallback ($1 per USDC) ─────────────
-
-    function test_totalAssets_usdcFallbackScales6DecTo8Dec() public {
-        // Vault holds 1 000 USDC (6 dec, no feed registered → treated as $1)
-        uint256 usdcAmount = 1_000e6;
-        usdc.mint(address(vault), usdcAmount);
-
-        // Expected: 1 000 USDC * $1 = $1 000 (8 dec) = 1_000e8
-        uint256 expected = 1_000e8;
-        assertEq(vault.totalAssets(), expected, "USDC $1 fallback wrong");
-    }
-
-    function test_totalAssets_combinedPortfolioAndDenomAsset() public {
-        // Vault holds 0.1 WBTC + 1 000 USDC
-        uint256 tenth_btc  = 0.1e8;
-        uint256 usdcAmount = 1_000e6;
-        wbtc.mint(address(vault), tenth_btc);
-        usdc.mint(address(vault), usdcAmount);
-
-        uint256 btcValue  = (tenth_btc * uint256(BTC_PRICE)) / 1e8; // $6 000
-        uint256 usdcValue = 1_000e8;                                  // $1 000
-        uint256 expected  = btcValue + usdcValue;                     // $7 000
-
-        assertEq(vault.totalAssets(), expected, "Combined portfolio + USDC wrong");
     }
 
     // ─── Price freshness boundary ─────────────────────────────────────────────

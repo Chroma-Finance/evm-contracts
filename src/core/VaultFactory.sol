@@ -8,12 +8,14 @@ import {EventNotifier} from "./EventNotifier.sol";
 import {RiskTierRegistry} from "../utils/RiskTierRegistry.sol";
 import {GuardianModule} from "../modules/GuardianModule.sol";
 import {SocialRecoveryModule} from "../modules/SocialRecoveryModule.sol";
+import {IChromaSwapRouter} from "../interfaces/ISwapRouter.sol";
 
 /**
  * @title VaultFactory
  * @notice Deploys per-user PortfolioVaults as EIP-1167 minimal proxies and maintains
  *         a registry of all deployed vaults.
  * @dev One vault per user per risk tier enforced via the nested `userVaults` mapping.
+ *      Each vault is fully initialized at deployment — no post-deploy setup required.
  *      Owner may upgrade the implementation for new deployments only —
  *      existing vaults are immutable.
  */
@@ -25,8 +27,8 @@ contract VaultFactory is Ownable {
     /// @notice Current vault implementation cloned for each new user.
     address public vaultImplementation;
 
-    /// @notice Denomination asset used by all vaults (e.g., USDC on Arbitrum).
-    address public denominationAsset;
+    /// @notice Swap router wired into every new vault at deployment.
+    address public swapRouter;
 
     /// @notice Registry supplying portfolio allocations per risk tier.
     address public riskRegistry;
@@ -37,10 +39,10 @@ contract VaultFactory is Ownable {
     /// @notice Centralized event emitter for all financial events.
     address public eventNotifier;
 
-    /// @notice Shared guardian module for EIP-712 signature-based withdrawal approval.
+    /// @notice Shared guardian module for EIP-712 withdrawal approvals.
     GuardianModule public guardianModule;
 
-    /// @notice Shared social recovery module wired immutably into every vault at deployment.
+    /// @notice Shared social recovery module wired into every vault at deployment.
     SocialRecoveryModule public recoveryModule;
 
     /// @notice User vaults by tier: user => tier => vault.
@@ -54,10 +56,9 @@ contract VaultFactory is Ownable {
 
     // ─── Events ──────────────────────────────────────────────────────────────
 
-    // VaultCreated is emitted by EventNotifier (centralized financial event tracking).
     event ImplementationUpgraded(address indexed oldImpl, address indexed newImpl);
     event FeeRecipientUpdated(address indexed newRecipient);
-    event DenominationAssetUpdated(address indexed newAsset);
+    event SwapRouterUpdated(address indexed newRouter);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -68,37 +69,36 @@ contract VaultFactory is Ownable {
     // ─── Constructor ─────────────────────────────────────────────────────────
 
     /**
-     * @param denominationAsset_ Denomination token for deposit/withdraw (e.g., USDC).
-     * @param riskRegistry_      Deployed RiskTierRegistry address.
-     * @param feeRecipient_      Initial fee recipient (typically the FeeManager).
+     * @param swapRouter_    Deployed SwapRouter address (wired into every vault).
+     * @param riskRegistry_  Deployed RiskTierRegistry address.
+     * @param feeRecipient_  Initial fee recipient (typically the FeeManager).
      */
     constructor(
-        address denominationAsset_,
+        address swapRouter_,
         address riskRegistry_,
         address feeRecipient_
     ) Ownable(msg.sender) {
-        if (denominationAsset_ == address(0) || riskRegistry_ == address(0) || feeRecipient_ == address(0)) {
-            revert ZeroAddress();
-        }
-        denominationAsset = denominationAsset_;
+        if (riskRegistry_ == address(0) || feeRecipient_ == address(0)) revert ZeroAddress();
+        swapRouter   = swapRouter_;
         riskRegistry = riskRegistry_;
         feeRecipient = feeRecipient_;
+
         vaultImplementation = address(new PortfolioVault());
 
         EventNotifier notifier = new EventNotifier(address(this));
         eventNotifier = address(notifier);
-        // Factory must be authorized to call emitVaultCreated.
         notifier.authorize(address(this));
 
-        guardianModule  = new GuardianModule();
-        recoveryModule  = new SocialRecoveryModule();
+        guardianModule = new GuardianModule();
+        recoveryModule = new SocialRecoveryModule();
     }
 
     // ─── External ────────────────────────────────────────────────────────────
 
     /**
-     * @notice Deploys a new PortfolioVault for the caller for the given risk tier.
+     * @notice Deploys a new PortfolioVault for the caller at the given risk tier.
      * @dev Each user may have at most one vault per tier. Reverts if one already exists.
+     *      The vault is fully initialized with immutable references to all shared modules.
      * @param riskTier_   Risk tier index (0=Low, 1=Medium, 2=High).
      * @param enableBoost Whether the YieldOptimizer boost module is enabled (TODO: wire up).
      * @return vault      Address of the newly deployed vault.
@@ -106,7 +106,6 @@ contract VaultFactory is Ownable {
     function createVault(uint8 riskTier_, bool enableBoost) external returns (address vault) {
         if (userVaults[msg.sender][riskTier_] != address(0)) revert TierVaultExists();
 
-        // Retrieve allocation from the registry (reverts if tier inactive or not found).
         (address[] memory tokens, uint256[] memory weights, address[] memory feeds) =
             RiskTierRegistry(riskRegistry).getTier(riskTier_);
 
@@ -115,35 +114,36 @@ contract VaultFactory is Ownable {
         PortfolioVault(vault).initialize(
             msg.sender,
             riskTier_,
-            denominationAsset,
             feeRecipient,
             eventNotifier,
             address(guardianModule),
             address(recoveryModule),
+            swapRouter,
             tokens,
             weights,
             feeds
         );
 
-        // Authorize vault to emit financial events through EventNotifier.
         EventNotifier(eventNotifier).authorize(vault);
+
+        // Authorize vault in SwapRouter so it can call batch swap functions.
+        if (swapRouter != address(0)) {
+            IChromaSwapRouter(swapRouter).authorizeVault(vault);
+        }
 
         userVaults[msg.sender][riskTier_] = vault;
         allVaults.push(vault);
         userTiers[msg.sender].push(riskTier_);
 
         // TODO: If enableBoost, register vault with YieldOptimizer.
-        (enableBoost); // suppress unused-param warning until YieldOptimizer is wired
+        (enableBoost);
 
         EventNotifier(eventNotifier).emitVaultCreated(msg.sender, vault, riskTier_);
     }
 
     // ─── Admin ───────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Replaces the implementation used for future vault deployments.
-     * @dev Does not affect existing vaults.
-     */
+    /// @notice Replaces the implementation used for future vault deployments.
     function upgradeImplementation(address newImpl) external onlyOwner {
         if (newImpl == address(0)) revert ZeroAddress();
         emit ImplementationUpgraded(vaultImplementation, newImpl);
@@ -157,68 +157,50 @@ contract VaultFactory is Ownable {
         emit FeeRecipientUpdated(newRecipient);
     }
 
-    /// @notice Updates the denomination asset for newly created vaults.
-    function setDenominationAsset(address newAsset) external onlyOwner {
-        if (newAsset == address(0)) revert ZeroAddress();
-        denominationAsset = newAsset;
-        emit DenominationAssetUpdated(newAsset);
+    /// @notice Updates the swap router applied to newly created vaults.
+    function setSwapRouter(address newRouter) external onlyOwner {
+        swapRouter = newRouter;
+        emit SwapRouterUpdated(newRouter);
     }
 
     // ─── Views ───────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Returns the vault address for a given user and tier (address(0) if none).
-     */
-    function getUserVault(address user, uint8 tier) external view returns (address vault) {
+    function getUserVault(address user, uint8 tier) external view returns (address) {
         return userVaults[user][tier];
     }
 
-    /**
-     * @notice Returns all vault addresses and their corresponding tier IDs for a user.
-     */
     function getUserVaults(address user)
-        external
-        view
+        external view
         returns (address[] memory vaults, uint8[] memory tiers)
     {
-        tiers = userTiers[user];
+        tiers  = userTiers[user];
         vaults = new address[](tiers.length);
         for (uint256 i = 0; i < tiers.length; i++) {
             vaults[i] = userVaults[user][tiers[i]];
         }
     }
 
-    /// @notice Returns true if the user has a vault for the specified tier.
     function hasVault(address user, uint8 tier) external view returns (bool) {
         return userVaults[user][tier] != address(0);
     }
 
-    /// @notice Total number of deployed vaults.
     function getVaultCount() external view returns (uint256) {
         return allVaults.length;
     }
 
-    /// @notice Returns the shared guardian module address.
     function getGuardianModule() external view returns (address) {
         return address(guardianModule);
     }
 
-    /// @notice Returns the shared social recovery module address.
     function getRecoveryModule() external view returns (address) {
         return address(recoveryModule);
     }
 
-    /**
-     * @notice Returns a paginated slice of all deployed vault addresses.
-     * @param offset Starting index (inclusive).
-     * @param limit  Maximum number of addresses to return.
-     */
     function getAllVaults(uint256 offset, uint256 limit)
-        external
-        view
+        external view
         returns (address[] memory vaults)
     {
-        uint256 end = offset + limit;
+        uint256 end    = offset + limit;
         if (end > allVaults.length) end = allVaults.length;
         uint256 length = end > offset ? end - offset : 0;
         vaults = new address[](length);

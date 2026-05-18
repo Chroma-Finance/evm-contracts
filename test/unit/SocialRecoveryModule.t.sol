@@ -19,7 +19,7 @@ contract MockVault {
         recoveryModule = rm;
     }
 
-    function transferOwnership(address newOwner) external {
+    function transferOwnershipFromRecovery(address newOwner) external {
         owner = newOwner;
     }
 

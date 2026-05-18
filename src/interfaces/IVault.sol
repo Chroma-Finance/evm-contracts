@@ -7,16 +7,17 @@ interface IVault {
     function riskTier() external view returns (uint8);
     function guardianModule() external view returns (address);
     function recoveryModule() external view returns (address);
-
-    // ERC-4626
-    function asset() external view returns (address);
     function totalAssets() external view returns (uint256);
-    function deposit(uint256 assets, address receiver) external returns (uint256 shares);
-    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares);
-    function mint(uint256 shares, address receiver) external returns (uint256 assets);
-    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
 
-    // Admin
-    function transferOwnership(address newOwner) external;
+    /// @notice Deposit any whitelisted token; only callable by vault owner.
+    function deposit(address inputToken, uint256 amount) external returns (uint256 shares);
+
+    /// @notice Withdraw by burning shares; only callable by vault owner.
+    function withdraw(address outputToken, uint256 shares, uint256 deadline, bytes calldata signature) external returns (uint256 usdValue);
+
+    /// @notice Transfer ownership via social recovery module only.
+    function transferOwnershipFromRecovery(address newOwner) external;
+
+    /// @notice Rotate the guardian address via guardian module.
     function setGuardianAddress(address newGuardian) external;
 }

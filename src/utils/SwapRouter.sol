@@ -12,27 +12,26 @@ import {AggregatorV3Interface} from "@chainlink/src/v0.8/shared/interfaces/Aggre
  * @title SwapRouter
  * @notice Wraps Uniswap V3 swaps with Chainlink oracle-validated slippage protection.
  *
- *         Deposit path: swapToPortfolio() converts a single denomination token (USDC)
- *         into the vault's portfolio allocation in one call.
+ *         Deposit path: swapToPortfolio() converts a user-supplied input token into the
+ *         vault's portfolio allocation in one call.
  *
- *         Withdrawal path: swapToInputToken() converts multiple portfolio tokens back
- *         to the denomination token in one call.
+ *         Withdrawal path: swapToInputToken() converts multiple portfolio tokens back to
+ *         a single user-requested output token in one call.
  *
- *         Both batch functions are restricted to the authorizedVault. Single-swap
- *         functions are open to any caller.
- *
- *         MEV protection: each swap enforces a maximum of {MAX_SLIPPAGE_BPS} (0.5%)
- *         deviation from the Chainlink mid-price. The swap reverts if the Uniswap
- *         fill price falls outside this band.
+ *         Security:
+ *         - Batch functions restricted to authorized vaults (registered by the factory).
+ *         - Input tokens (deposit) and output tokens (withdrawal) must be whitelisted.
+ *         - Each swap enforces a maximum of MAX_SLIPPAGE_BPS (0.5%) deviation from the
+ *           Chainlink mid-price, blocking sandwich attacks.
  */
 contract SwapRouter is Ownable {
     using SafeERC20 for IERC20;
 
     // ─── Constants ───────────────────────────────────────────────────────────
 
-    uint256 public constant MAX_SLIPPAGE_BPS = 50;          // 0.5%
-    uint256 public constant BPS_DENOMINATOR  = 10_000;
-    uint8   public constant PRICE_DECIMALS   = 8;           // Chainlink standard
+    uint256 public constant MAX_SLIPPAGE_BPS        = 50;
+    uint256 public constant BPS_DENOMINATOR         = 10_000;
+    uint8   public constant PRICE_DECIMALS          = 8;
     uint256 public constant PRICE_STALENESS_THRESHOLD = 1 hours;
 
     // ─── State ───────────────────────────────────────────────────────────────
@@ -40,21 +39,28 @@ contract SwapRouter is Ownable {
     /// @notice Uniswap V3 SwapRouter (immutable per-chain deployment).
     ISwapRouter public immutable uniswapRouter;
 
-    /// @notice Chainlink price feeds per token (tokenAddress → feed).
+    /// @notice Chainlink price feeds per token.
     mapping(address => address) public priceFeeds;
 
     /// @notice Uniswap V3 pool fee tier per sorted token pair.
     mapping(bytes32 => uint24) internal _poolFees;
 
-    /// @notice Only this vault may call the batch swap functions.
-    address public authorizedVault;
+    /// @notice Vaults authorized to call the batch swap functions.
+    mapping(address => bool) public authorizedVaults;
+
+    /// @notice Tokens accepted as deposit input (swapToPortfolio tokenIn) or
+    ///         withdrawal output (swapToInputToken tokenOut).
+    mapping(address => bool) public isWhitelistedToken;
 
     // ─── Events ──────────────────────────────────────────────────────────────
 
     event Swapped(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
     event PriceFeedSet(address indexed token, address indexed feed);
     event PoolFeeSet(address indexed tokenA, address indexed tokenB, uint24 fee);
-    event AuthorizedVaultSet(address indexed vault);
+    event VaultAuthorized(address indexed vault);
+    event VaultDeauthorized(address indexed vault);
+    event TokenWhitelisted(address indexed token);
+    event TokenDelisted(address indexed token);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -62,21 +68,21 @@ contract SwapRouter is Ownable {
     error ZeroAddress();
     error SameToken();
     error Unauthorized();
+    error TokenNotWhitelisted(address token);
     error NoPriceFeed(address token);
     error InvalidPrice(address token);
     error StalePriceFeed(address token);
     error InsufficientOutput(uint256 minRequired, uint256 received);
 
-    // ─── Modifiers ───────────────────────────────────────────────────────────
+    // ─── Modifier ────────────────────────────────────────────────────────────
 
     modifier onlyVault() {
-        if (msg.sender != authorizedVault) revert Unauthorized();
+        if (!authorizedVaults[msg.sender]) revert Unauthorized();
         _;
     }
 
     // ─── Constructor ─────────────────────────────────────────────────────────
 
-    /// @param uniswapRouter_ Uniswap V3 SwapRouter address for the target chain.
     constructor(address uniswapRouter_) Ownable(msg.sender) {
         if (uniswapRouter_ == address(0)) revert ZeroAddress();
         uniswapRouter = ISwapRouter(uniswapRouter_);
@@ -92,16 +98,36 @@ contract SwapRouter is Ownable {
     }
 
     /// @notice Set the Uniswap V3 pool fee tier for a token pair.
-    /// @param fee Fee in hundredths of a bip (100=0.01%, 500=0.05%, 3000=0.3%, 10000=1%).
     function setPoolFee(address tokenA, address tokenB, uint24 fee) external onlyOwner {
         _poolFees[_pairHash(tokenA, tokenB)] = fee;
         emit PoolFeeSet(tokenA, tokenB, fee);
     }
 
-    /// @notice Designate the sole vault permitted to call batch swap functions.
-    function setAuthorizedVault(address vault_) external onlyOwner {
-        authorizedVault = vault_;
-        emit AuthorizedVaultSet(vault_);
+    /// @notice Authorize a vault to call the batch swap functions.
+    /// @dev Called by VaultFactory each time a new vault is deployed.
+    function authorizeVault(address vault_) external onlyOwner {
+        if (vault_ == address(0)) revert ZeroAddress();
+        authorizedVaults[vault_] = true;
+        emit VaultAuthorized(vault_);
+    }
+
+    /// @notice Remove a vault's swap authorization.
+    function deauthorizeVault(address vault_) external onlyOwner {
+        authorizedVaults[vault_] = false;
+        emit VaultDeauthorized(vault_);
+    }
+
+    /// @notice Add a token to the whitelist (accepted for deposit input or withdrawal output).
+    function whitelistToken(address token) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        isWhitelistedToken[token] = true;
+        emit TokenWhitelisted(token);
+    }
+
+    /// @notice Remove a token from the whitelist.
+    function delistToken(address token) external onlyOwner {
+        isWhitelistedToken[token] = false;
+        emit TokenDelisted(token);
     }
 
     // ─── Batch swaps (vault only) ─────────────────────────────────────────────
@@ -109,13 +135,15 @@ contract SwapRouter is Ownable {
     /**
      * @notice Swap `amountsIn[i]` of `tokenIn` into each `tokensOut[i]`.
      * @dev Caller must approve this contract for sum(amountsIn) of tokenIn.
-     *      Each swap validates output against Chainlink before executing.
+     *      `tokenIn` must be whitelisted. Each swap is oracle-validated.
      */
     function swapToPortfolio(
         address tokenIn,
         address[] calldata tokensOut,
         uint256[] calldata amountsIn
     ) external onlyVault returns (uint256[] memory amountsOut) {
+        if (!isWhitelistedToken[tokenIn]) revert TokenNotWhitelisted(tokenIn);
+
         uint256 n = tokensOut.length;
         amountsOut = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
@@ -127,13 +155,15 @@ contract SwapRouter is Ownable {
     /**
      * @notice Swap `amountsIn[i]` of each `tokensIn[i]` into `tokenOut`.
      * @dev Caller must approve this contract for each tokensIn[i] amount.
-     *      Returns total tokenOut received across all swaps.
+     *      `tokenOut` must be whitelisted. Returns total tokenOut received.
      */
     function swapToInputToken(
         address[] calldata tokensIn,
         uint256[] calldata amountsIn,
         address tokenOut
     ) external onlyVault returns (uint256 totalOut) {
+        if (!isWhitelistedToken[tokenOut]) revert TokenNotWhitelisted(tokenOut);
+
         uint256 n = tokensIn.length;
         for (uint256 i = 0; i < n; i++) {
             if (amountsIn[i] == 0) continue;
@@ -178,8 +208,6 @@ contract SwapRouter is Ownable {
 
     /**
      * @notice Multi-hop swap with an ABI-packed path.
-     * @dev Path: abi.encodePacked(tokenIn, fee0, token1, fee1, ..., tokenOut).
-     *      Caller must approve this contract for `amountIn` of the input token.
      */
     function swapExactInputMultihop(
         bytes calldata path,
@@ -206,12 +234,8 @@ contract SwapRouter is Ownable {
         emit Swapped(tokenIn, tokenOut, amountIn, amountOut);
     }
 
-    // ─── View helpers ─────────────────────────────────────────────────────────
+    // ─── Views ────────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Oracle-based expected output for a given swap.
-     * @dev Useful for off-chain quoting. Returns 0 if either feed is missing.
-     */
     function getExpectedOutput(
         address tokenIn,
         address tokenOut,
@@ -220,7 +244,6 @@ contract SwapRouter is Ownable {
         return _getExpectedOutput(tokenIn, tokenOut, amountIn);
     }
 
-    /// @notice Minimum output enforced by the oracle (amountIn → oracle price × 99.5%).
     function getMinAmountOut(
         address tokenIn,
         address tokenOut,
@@ -230,7 +253,6 @@ contract SwapRouter is Ownable {
         return expected * (BPS_DENOMINATOR - MAX_SLIPPAGE_BPS) / BPS_DENOMINATOR;
     }
 
-    /// @notice Pool fee for a token pair, defaulting to 3000 (0.3%) when not configured.
     function getPoolFee(address tokenA, address tokenB) external view returns (uint24) {
         return _getPoolFee(tokenA, tokenB);
     }
@@ -272,13 +294,11 @@ contract SwapRouter is Ownable {
         address tokenOut,
         uint256 amountIn
     ) internal view returns (uint256 expectedOut) {
-        uint256 priceIn   = _getTokenPrice(tokenIn);
-        uint256 priceOut  = _getTokenPrice(tokenOut);
-        uint8   decIn     = IERC20Metadata(tokenIn).decimals();
-        uint8   decOut    = IERC20Metadata(tokenOut).decimals();
+        uint256 priceIn  = _getTokenPrice(tokenIn);
+        uint256 priceOut = _getTokenPrice(tokenOut);
+        uint8   decIn    = IERC20Metadata(tokenIn).decimals();
+        uint8   decOut   = IERC20Metadata(tokenOut).decimals();
 
-        // valueUSD (8 dec) = amountIn * priceIn / 10^decIn
-        // expectedOut      = valueUSD * 10^decOut / priceOut
         uint256 valueUSD = amountIn * priceIn / (10 ** decIn);
         expectedOut = valueUSD * (10 ** decOut) / priceOut;
     }
@@ -295,8 +315,8 @@ contract SwapRouter is Ownable {
             uint80 answeredInRound
         ) = AggregatorV3Interface(feed).latestRoundData();
 
-        if (answer <= 0)                                      revert InvalidPrice(token);
-        if (updatedAt == 0 || answeredInRound < roundId)     revert StalePriceFeed(token);
+        if (answer <= 0)                                            revert InvalidPrice(token);
+        if (updatedAt == 0 || answeredInRound < roundId)           revert StalePriceFeed(token);
         if (block.timestamp - updatedAt > PRICE_STALENESS_THRESHOLD) revert StalePriceFeed(token);
 
         price = uint256(answer);
@@ -304,7 +324,7 @@ contract SwapRouter is Ownable {
 
     function _getPoolFee(address tokenA, address tokenB) internal view returns (uint24 fee) {
         fee = _poolFees[_pairHash(tokenA, tokenB)];
-        if (fee == 0) return 3_000; // default 0.3%
+        if (fee == 0) return 3_000;
     }
 
     function _pairHash(address tokenA, address tokenB) internal pure returns (bytes32) {

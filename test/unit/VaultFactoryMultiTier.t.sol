@@ -5,12 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {VaultFactory} from "../../src/core/VaultFactory.sol";
 import {PortfolioVault} from "../../src/core/PortfolioVault.sol";
 import {RiskTierRegistry} from "../../src/utils/RiskTierRegistry.sol";
+import {IChromaSwapRouter} from "../../src/interfaces/ISwapRouter.sol";
 
-// Minimal ERC-20 mock for tests.
+// ─── Mock ERC-20 ─────────────────────────────────────────────────────────────
+
 contract MockERC20 {
-    string public name     = "Mock USDC";
-    string public symbol   = "USDC";
-    uint8  public decimals = 6;
+    string  public name;
+    string  public symbol;
+    uint8   public decimals;
     uint256 public totalSupply;
 
     mapping(address => uint256) public balanceOf;
@@ -18,6 +20,10 @@ contract MockERC20 {
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(string memory name_, string memory symbol_, uint8 decimals_) {
+        name = name_; symbol = symbol_; decimals = decimals_;
+    }
 
     function mint(address to, uint256 amount) external {
         totalSupply += amount;
@@ -47,90 +53,167 @@ contract MockERC20 {
     }
 }
 
+// ─── Mock Chainlink aggregator ($1 price) ─────────────────────────────────────
+
+contract MockAggregator {
+    uint80 public roundId = 1;
+
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (roundId, 1e8, 0, block.timestamp, roundId);
+    }
+}
+
+// ─── Mock SwapRouter ─────────────────────────────────────────────────────────
+//
+// Pulls inputToken from caller, mints tokensOut 1:1, so all tokens are valued
+// equally at $1 (matching the MockAggregator price). Implements IChromaSwapRouter.
+
+contract MockSwapRouter is IChromaSwapRouter {
+    function swapToPortfolio(
+        address tokenIn,
+        address[] calldata tokensOut,
+        uint256[] calldata amountsIn
+    ) external returns (uint256[] memory amountsOut) {
+        uint256 total;
+        for (uint256 i = 0; i < amountsIn.length; i++) total += amountsIn[i];
+        MockERC20(tokenIn).transferFrom(msg.sender, address(this), total);
+        amountsOut = new uint256[](tokensOut.length);
+        for (uint256 i = 0; i < tokensOut.length; i++) {
+            amountsOut[i] = amountsIn[i];
+            if (amountsIn[i] > 0) MockERC20(tokensOut[i]).mint(msg.sender, amountsIn[i]);
+        }
+    }
+
+    function swapToInputToken(
+        address[] calldata tokensIn,
+        uint256[] calldata amountsIn,
+        address tokenOut
+    ) external returns (uint256 totalOut) {
+        for (uint256 i = 0; i < tokensIn.length; i++) {
+            if (amountsIn[i] == 0) continue;
+            MockERC20(tokensIn[i]).transferFrom(msg.sender, address(this), amountsIn[i]);
+            MockERC20(tokenOut).mint(msg.sender, amountsIn[i]);
+            totalOut += amountsIn[i];
+        }
+    }
+
+    function authorizeVault(address) external {}
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
 contract VaultFactoryMultiTierTest is Test {
-    VaultFactory      internal factory;
-    RiskTierRegistry  internal registry;
-    MockERC20         internal usdc;
+    VaultFactory     internal factory;
+    RiskTierRegistry internal registry;
+    MockSwapRouter   internal router;
+    MockERC20        internal usdc;
 
     address internal feeRecipient = makeAddr("feeRecipient");
     address internal userA        = makeAddr("userA");
     address internal userB        = makeAddr("userB");
 
-    // Dummy token addresses used in tier configurations.
-    address internal WBTC  = makeAddr("WBTC");
-    address internal WETH  = makeAddr("WETH");
-    address internal XAUT  = makeAddr("XAUT");
-    address internal PAXG  = makeAddr("PAXG");
-    address internal STETH = makeAddr("stETH");
-    address internal ALTS  = makeAddr("ALTS");
+    // Real MockERC20 instances so swaps can mint to vaults.
+    MockERC20 internal WBTC;
+    MockERC20 internal WETH;
+    MockERC20 internal XAUT;
+    MockERC20 internal PAXG;
+    MockERC20 internal STETH;
+    MockERC20 internal ALTS;
 
-    // Dummy Chainlink feed placeholders (zero-address is fine for unit tests).
-    address internal FEED_WBTC  = makeAddr("feed_wbtc");
-    address internal FEED_WETH  = makeAddr("feed_weth");
-    address internal FEED_XAUT  = makeAddr("feed_xaut");
-    address internal FEED_PAXG  = makeAddr("feed_paxg");
-    address internal FEED_STETH = makeAddr("feed_steth");
-    address internal FEED_ALTS  = makeAddr("feed_alts");
+    MockAggregator internal feedWbtc;
+    MockAggregator internal feedWeth;
+    MockAggregator internal feedXaut;
+    MockAggregator internal feedPaxg;
+    MockAggregator internal feedSteth;
+    MockAggregator internal feedAlts;
 
     function setUp() public {
-        usdc     = new MockERC20();
+        usdc  = new MockERC20("USD Coin",  "USDC",  6);
+        WBTC  = new MockERC20("Wrapped BTC",  "WBTC",  6);
+        WETH  = new MockERC20("Wrapped ETH",  "WETH",  6);
+        XAUT  = new MockERC20("Tether Gold",  "XAUT",  6);
+        PAXG  = new MockERC20("PAX Gold",     "PAXG",  6);
+        STETH = new MockERC20("Staked ETH",   "stETH", 6);
+        ALTS  = new MockERC20("Alts Token",   "ALTS",  6);
+
+        feedWbtc  = new MockAggregator();
+        feedWeth  = new MockAggregator();
+        feedXaut  = new MockAggregator();
+        feedPaxg  = new MockAggregator();
+        feedSteth = new MockAggregator();
+        feedAlts  = new MockAggregator();
+
         registry = new RiskTierRegistry();
+        router   = new MockSwapRouter();
 
         // Tier 0 — Low Risk: 40% WBTC | 30% XAUT | 30% PAXG
-        address[] memory t0Assets = new address[](3);
-        uint256[] memory t0Weights = new uint256[](3);
-        address[] memory t0Feeds   = new address[](3);
-        t0Assets[0] = WBTC;  t0Weights[0] = 4_000; t0Feeds[0] = FEED_WBTC;
-        t0Assets[1] = XAUT;  t0Weights[1] = 3_000; t0Feeds[1] = FEED_XAUT;
-        t0Assets[2] = PAXG;  t0Weights[2] = 3_000; t0Feeds[2] = FEED_PAXG;
-        registry.createTier(0, "Low Risk", t0Assets, t0Weights, t0Feeds);
+        {
+            address[] memory t = new address[](3);
+            uint256[] memory w = new uint256[](3);
+            address[] memory f = new address[](3);
+            t[0] = address(WBTC);  w[0] = 4_000;  f[0] = address(feedWbtc);
+            t[1] = address(XAUT);  w[1] = 3_000;  f[1] = address(feedXaut);
+            t[2] = address(PAXG);  w[2] = 3_000;  f[2] = address(feedPaxg);
+            registry.createTier(0, "Low Risk", t, w, f);
+        }
 
-        // Tier 1 — Medium Risk: 25/25/20/20/10
-        address[] memory t1Assets  = new address[](5);
-        uint256[] memory t1Weights = new uint256[](5);
-        address[] memory t1Feeds   = new address[](5);
-        t1Assets[0] = WBTC;  t1Weights[0] = 2_500; t1Feeds[0] = FEED_WBTC;
-        t1Assets[1] = WETH;  t1Weights[1] = 2_500; t1Feeds[1] = FEED_WETH;
-        t1Assets[2] = XAUT;  t1Weights[2] = 2_000; t1Feeds[2] = FEED_XAUT;
-        t1Assets[3] = PAXG;  t1Weights[3] = 2_000; t1Feeds[3] = FEED_PAXG;
-        t1Assets[4] = STETH; t1Weights[4] = 1_000; t1Feeds[4] = FEED_STETH;
-        registry.createTier(1, "Medium Risk", t1Assets, t1Weights, t1Feeds);
+        // Tier 1 — Medium Risk
+        {
+            address[] memory t = new address[](5);
+            uint256[] memory w = new uint256[](5);
+            address[] memory f = new address[](5);
+            t[0] = address(WBTC);  w[0] = 2_500;  f[0] = address(feedWbtc);
+            t[1] = address(WETH);  w[1] = 2_500;  f[1] = address(feedWeth);
+            t[2] = address(XAUT);  w[2] = 2_000;  f[2] = address(feedXaut);
+            t[3] = address(PAXG);  w[3] = 2_000;  f[3] = address(feedPaxg);
+            t[4] = address(STETH); w[4] = 1_000;  f[4] = address(feedSteth);
+            registry.createTier(1, "Medium Risk", t, w, f);
+        }
 
-        // Tier 2 — High Risk: 25/25/15/10/10/15
-        address[] memory t2Assets  = new address[](6);
-        uint256[] memory t2Weights = new uint256[](6);
-        address[] memory t2Feeds   = new address[](6);
-        t2Assets[0] = WBTC;  t2Weights[0] = 2_500; t2Feeds[0] = FEED_WBTC;
-        t2Assets[1] = WETH;  t2Weights[1] = 2_500; t2Feeds[1] = FEED_WETH;
-        t2Assets[2] = STETH; t2Weights[2] = 1_500; t2Feeds[2] = FEED_STETH;
-        t2Assets[3] = XAUT;  t2Weights[3] = 1_000; t2Feeds[3] = FEED_XAUT;
-        t2Assets[4] = PAXG;  t2Weights[4] = 1_000; t2Feeds[4] = FEED_PAXG;
-        t2Assets[5] = ALTS;  t2Weights[5] = 1_500; t2Feeds[5] = FEED_ALTS;
-        registry.createTier(2, "High Risk", t2Assets, t2Weights, t2Feeds);
+        // Tier 2 — High Risk
+        {
+            address[] memory t = new address[](6);
+            uint256[] memory w = new uint256[](6);
+            address[] memory f = new address[](6);
+            t[0] = address(WBTC);  w[0] = 2_500;  f[0] = address(feedWbtc);
+            t[1] = address(WETH);  w[1] = 2_500;  f[1] = address(feedWeth);
+            t[2] = address(STETH); w[2] = 1_500;  f[2] = address(feedSteth);
+            t[3] = address(XAUT);  w[3] = 1_000;  f[3] = address(feedXaut);
+            t[4] = address(PAXG);  w[4] = 1_000;  f[4] = address(feedPaxg);
+            t[5] = address(ALTS);  w[5] = 1_500;  f[5] = address(feedAlts);
+            registry.createTier(2, "High Risk", t, w, f);
+        }
 
-        factory = new VaultFactory(address(usdc), address(registry), feeRecipient);
+        factory = new VaultFactory(address(router), address(registry), feeRecipient);
     }
 
-    // ─── Test 1: Multiple vaults per user ────────────────────────────────────
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    function _deposit(address vaultAddr, address depositor, uint256 amount) internal {
+        usdc.mint(depositor, amount);
+        vm.startPrank(depositor);
+        usdc.approve(vaultAddr, amount);
+        PortfolioVault(vaultAddr).deposit(address(usdc), amount);
+        vm.stopPrank();
+    }
+
+    // ─── Vault creation registry ─────────────────────────────────────────────
 
     function test_createVault_multiplePerUser() public {
         vm.startPrank(userA);
-
         address vault0 = factory.createVault(0, false);
         address vault1 = factory.createVault(1, false);
         address vault2 = factory.createVault(2, false);
+        vm.stopPrank();
 
-        assertEq(factory.getUserVault(userA, 0), vault0, "Low vault mismatch");
-        assertEq(factory.getUserVault(userA, 1), vault1, "Med vault mismatch");
-        assertEq(factory.getUserVault(userA, 2), vault2, "High vault mismatch");
+        assertEq(factory.getUserVault(userA, 0), vault0);
+        assertEq(factory.getUserVault(userA, 1), vault1);
+        assertEq(factory.getUserVault(userA, 2), vault2);
 
         (address[] memory vaults, uint8[] memory tiers) = factory.getUserVaults(userA);
-        assertEq(vaults.length, 3, "Should have 3 vaults");
-        assertEq(tiers.length, 3, "Should have 3 tiers");
-
+        assertEq(vaults.length, 3);
+        assertEq(tiers.length, 3);
         assertEq(factory.getVaultCount(), 3);
-
-        vm.stopPrank();
     }
 
     function test_createVault_vaultsAreIsolated() public {
@@ -139,17 +222,14 @@ contract VaultFactoryMultiTierTest is Test {
         address vault1 = factory.createVault(1, false);
         vm.stopPrank();
 
-        assertTrue(vault0 != vault1, "Each tier must produce a distinct vault");
+        assertTrue(vault0 != vault1);
         assertEq(PortfolioVault(vault0).riskTier(), 0);
         assertEq(PortfolioVault(vault1).riskTier(), 1);
     }
 
-    // ─── Test 2: Cannot create duplicate tier vault ───────────────────────────
-
     function test_createVault_revertOnDuplicateTier() public {
         vm.startPrank(userA);
         factory.createVault(0, false);
-
         vm.expectRevert(VaultFactory.TierVaultExists.selector);
         factory.createVault(0, false);
         vm.stopPrank();
@@ -158,122 +238,98 @@ contract VaultFactoryMultiTierTest is Test {
     function test_createVault_sameTierDifferentUsersAllowed() public {
         vm.prank(userA);
         address vaultA = factory.createVault(0, false);
-
         vm.prank(userB);
         address vaultB = factory.createVault(0, false);
 
-        assertTrue(vaultA != vaultB, "Different users get distinct vaults");
+        assertTrue(vaultA != vaultB);
     }
 
-    // ─── Test 3: Deposit enforces receiver == msg.sender ─────────────────────
+    // ─── Deposit: only owner can deposit ─────────────────────────────────────
 
-    function test_deposit_succeedsForSelf() public {
+    function test_deposit_succeedsForOwner() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
         uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
+        _deposit(vault, userA, amount);
 
-        vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        uint256 shares = PortfolioVault(vault).deposit(amount, userA);
-        vm.stopPrank();
-
-        assertGt(shares, 0, "Should receive non-zero shares");
-        assertEq(PortfolioVault(vault).balanceOf(userA), shares);
+        assertGt(PortfolioVault(vault).balanceOf(userA), 0);
     }
 
-    function test_deposit_revertForThirdPartyReceiver() public {
+    function test_deposit_revertForNonOwner() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
         uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
-
-        vm.startPrank(userA);
+        usdc.mint(userB, amount);
+        vm.startPrank(userB);
         usdc.approve(vault, amount);
         vm.expectRevert(PortfolioVault.Unauthorized.selector);
-        PortfolioVault(vault).deposit(amount, userB);
+        PortfolioVault(vault).deposit(address(usdc), amount);
         vm.stopPrank();
     }
 
-    // ─── Test 4: Withdraw enforces receiver == owner == msg.sender ───────────
+    // ─── Withdraw: only owner can withdraw ───────────────────────────────────
 
-    function test_withdraw_succeedsForSelf() public {
+    function test_withdraw_succeedsForOwner() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
         uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
+        _deposit(vault, userA, amount);
 
-        vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        PortfolioVault(vault).deposit(amount, userA);
+        uint256 shares = PortfolioVault(vault).balanceOf(userA);
+        assertGt(shares, 0);
 
-        uint256 balanceBefore = usdc.balanceOf(userA);
-        PortfolioVault(vault).withdraw(amount, userA, userA);
-        vm.stopPrank();
+        // Withdraw as portfolio tokens (outputToken = address(0))
+        vm.prank(userA);
+        PortfolioVault(vault).withdraw(address(0), shares, block.timestamp, new bytes(0));
 
-        // User receives the full USDC amount back (no performance fee on first exit).
-        assertEq(usdc.balanceOf(userA), balanceBefore + amount);
+        assertEq(PortfolioVault(vault).balanceOf(userA), 0);
     }
 
-    function test_withdraw_revertWhenReceiverIsThirdParty() public {
+    function test_withdraw_revertForNonOwner() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
-        uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
+        _deposit(vault, userA, 1_000e6);
+        uint256 shares = PortfolioVault(vault).balanceOf(userA);
 
-        vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        PortfolioVault(vault).deposit(amount, userA);
-
+        vm.prank(userB);
         vm.expectRevert(PortfolioVault.Unauthorized.selector);
-        PortfolioVault(vault).withdraw(amount, userB, userA);
-        vm.stopPrank();
+        PortfolioVault(vault).withdraw(address(0), shares, block.timestamp, new bytes(0));
     }
 
-    function test_withdraw_revertWhenOwnerIsThirdParty() public {
+    // ─── transferOwnership blocked ────────────────────────────────────────────
+
+    function test_transferOwnership_reverts() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
-        uint256 amount = 1_000e6;
-        usdc.mint(userA, amount);
-
-        vm.startPrank(userA);
-        usdc.approve(vault, amount);
-        PortfolioVault(vault).deposit(amount, userA);
-
-        vm.expectRevert(PortfolioVault.Unauthorized.selector);
-        PortfolioVault(vault).withdraw(amount, userA, userB);
-        vm.stopPrank();
+        vm.prank(userA);
+        vm.expectRevert(PortfolioVault.OwnershipTransferBlocked.selector);
+        PortfolioVault(vault).transferOwnership(userB);
     }
 
-    // ─── Test 5: Multiple users, multiple tiers ───────────────────────────────
+    // ─── Multiple users, multiple tiers ──────────────────────────────────────
 
     function test_multipleUsersMultipleTiers() public {
-        // User A creates Low + High.
         vm.startPrank(userA);
         factory.createVault(0, false);
         factory.createVault(2, false);
         vm.stopPrank();
 
-        // User B creates Medium only.
         vm.prank(userB);
         factory.createVault(1, false);
 
-        (address[] memory vaultsA, uint8[] memory tiersA) = factory.getUserVaults(userA);
-        assertEq(vaultsA.length, 2, "User A should have 2 vaults");
-        assertEq(tiersA.length, 2);
+        (address[] memory vaultsA,) = factory.getUserVaults(userA);
+        assertEq(vaultsA.length, 2);
 
-        (address[] memory vaultsB, uint8[] memory tiersB) = factory.getUserVaults(userB);
-        assertEq(vaultsB.length, 1, "User B should have 1 vault");
-        assertEq(tiersB.length, 1);
+        (address[] memory vaultsB,) = factory.getUserVaults(userB);
+        assertEq(vaultsB.length, 1);
 
         assertEq(factory.getVaultCount(), 3);
 
-        // hasVault spot checks.
         assertTrue(factory.hasVault(userA, 0));
         assertFalse(factory.hasVault(userA, 1));
         assertTrue(factory.hasVault(userA, 2));
@@ -281,7 +337,7 @@ contract VaultFactoryMultiTierTest is Test {
         assertTrue(factory.hasVault(userB, 1));
     }
 
-    // ─── Test 6: Paginated getAllVaults ───────────────────────────────────────
+    // ─── Paginated getAllVaults ────────────────────────────────────────────────
 
     function test_getAllVaults_pagination() public {
         vm.prank(userA);
@@ -294,21 +350,21 @@ contract VaultFactoryMultiTierTest is Test {
         address[] memory page1 = factory.getAllVaults(0, 2);
         assertEq(page1.length, 2);
 
-        address[] memory page2 = factory.getAllVaults(2, 10); // limit exceeds remaining
+        address[] memory page2 = factory.getAllVaults(2, 10);
         assertEq(page2.length, 1);
 
         address[] memory all = factory.getAllVaults(0, 100);
         assertEq(all.length, 3);
     }
 
-    // ─── Test 7: withdrawAll ─────────────────────────────────────────────────
+    // ─── Zero shares with no balance ─────────────────────────────────────────
 
-    function test_withdrawAll_revertWhenNoShares() public {
+    function test_withdraw_zeroShares_reverts() public {
         vm.prank(userA);
         address vault = factory.createVault(0, false);
 
         vm.prank(userA);
         vm.expectRevert(PortfolioVault.ZeroAmount.selector);
-        PortfolioVault(vault).withdrawAll();
+        PortfolioVault(vault).withdraw(address(0), 0, block.timestamp, new bytes(0));
     }
 }

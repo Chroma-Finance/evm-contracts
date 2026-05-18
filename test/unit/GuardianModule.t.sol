@@ -7,26 +7,31 @@ import {IGuardian} from "../../src/interfaces/IGuardian.sol";
 import {VaultFactory} from "../../src/core/VaultFactory.sol";
 import {PortfolioVault} from "../../src/core/PortfolioVault.sol";
 import {RiskTierRegistry} from "../../src/utils/RiskTierRegistry.sol";
+import {IChromaSwapRouter} from "../../src/interfaces/ISwapRouter.sol";
 
-// ─── Minimal vault stub for unit tests ──────────────────────────────────────
+// ─── Minimal vault stub for unit tests ───────────────────────────────────────
 
 contract MockVault {
     address public owner;
     constructor(address owner_) { owner = owner_; }
 }
 
-// ─── Minimal ERC-20 for integration tests ────────────────────────────────────
+// ─── ERC-20 mock ─────────────────────────────────────────────────────────────
 
 contract MockERC20 {
-    string public name     = "Mock USDC";
-    string public symbol   = "USDC";
-    uint8  public decimals = 6;
+    string  public name;
+    string  public symbol;
+    uint8   public decimals;
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(string memory name_, string memory symbol_, uint8 decimals_) {
+        name = name_; symbol = symbol_; decimals = decimals_;
+    }
 
     function mint(address to, uint256 amount) external {
         totalSupply += amount; balanceOf[to] += amount;
@@ -50,6 +55,49 @@ contract MockERC20 {
     }
 }
 
+// ─── Mock Chainlink aggregator ($1 price) ─────────────────────────────────────
+
+contract MockAggregator {
+    uint80 public roundId = 1;
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (roundId, 1e8, 0, block.timestamp, roundId);
+    }
+}
+
+// ─── Mock SwapRouter ─────────────────────────────────────────────────────────
+
+contract MockSwapRouter is IChromaSwapRouter {
+    function swapToPortfolio(
+        address tokenIn,
+        address[] calldata tokensOut,
+        uint256[] calldata amountsIn
+    ) external returns (uint256[] memory amountsOut) {
+        uint256 total;
+        for (uint256 i = 0; i < amountsIn.length; i++) total += amountsIn[i];
+        MockERC20(tokenIn).transferFrom(msg.sender, address(this), total);
+        amountsOut = new uint256[](tokensOut.length);
+        for (uint256 i = 0; i < tokensOut.length; i++) {
+            amountsOut[i] = amountsIn[i];
+            if (amountsIn[i] > 0) MockERC20(tokensOut[i]).mint(msg.sender, amountsIn[i]);
+        }
+    }
+
+    function swapToInputToken(
+        address[] calldata tokensIn,
+        uint256[] calldata amountsIn,
+        address tokenOut
+    ) external returns (uint256 totalOut) {
+        for (uint256 i = 0; i < tokensIn.length; i++) {
+            if (amountsIn[i] == 0) continue;
+            MockERC20(tokensIn[i]).transferFrom(msg.sender, address(this), amountsIn[i]);
+            MockERC20(tokenOut).mint(msg.sender, amountsIn[i]);
+            totalOut += amountsIn[i];
+        }
+    }
+
+    function authorizeVault(address) external {}
+}
+
 // ─── Unit tests for GuardianModule ───────────────────────────────────────────
 
 contract GuardianModuleUnitTest is Test {
@@ -71,7 +119,6 @@ contract GuardianModuleUnitTest is Test {
         guardian = vm.addr(guardianKey);
         mockVault = new MockVault(vaultOwner);
 
-        // Initial setup: guardian is address(0) → no signature required
         vm.prank(vaultOwner);
         gm.setGuardian(address(mockVault), guardian, new bytes(0));
     }
@@ -115,10 +162,9 @@ contract GuardianModuleUnitTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    // ─── setGuardian – initial set (path 1) ──────────────────────────────────
+    // ─── setGuardian – initial set ────────────────────────────────────────────
 
     function test_setGuardian_initialSet_onlyOwner_reverts() public {
-        // Non-owner attempts initial set on a fresh vault (guardian is address(0))
         MockVault freshVault = new MockVault(vaultOwner);
         vm.expectRevert(GuardianModule.Unauthorized.selector);
         gm.setGuardian(address(freshVault), guardian, new bytes(0));
@@ -133,10 +179,9 @@ contract GuardianModuleUnitTest is Test {
         gm.setGuardian(address(freshVault), newGuardian, new bytes(0));
     }
 
-    // ─── setGuardian – owner-initiated change with guardian sig (path 3) ─────
+    // ─── setGuardian – owner-initiated change with guardian sig ───────────────
 
     function test_setGuardian_alreadySet_noSignature_reverts() public {
-        // Guardian is set (from setUp). Owner submits empty sig → InvalidSignature.
         vm.expectRevert(GuardianModule.InvalidSignature.selector);
         vm.prank(vaultOwner);
         gm.setGuardian(address(mockVault), makeAddr("newGuardian"), new bytes(0));
@@ -183,7 +228,6 @@ contract GuardianModuleUnitTest is Test {
     function test_setGuardian_invalidSignature_reverts() public {
         address newGuardian = makeAddr("newGuardian");
         uint256 nonce = gm.guardianChangeNonces(address(mockVault));
-        // Sign with a key that is not the current guardian
         bytes memory sig = _signGuardianUpdateWith(address(mockVault), newGuardian, nonce, 0xDEAD);
 
         vm.expectRevert(GuardianModule.InvalidSignature.selector);
@@ -197,15 +241,14 @@ contract GuardianModuleUnitTest is Test {
         bytes memory sig = _signGuardianUpdate(address(mockVault), newGuardian, nonce);
 
         vm.prank(vaultOwner);
-        gm.setGuardian(address(mockVault), newGuardian, sig); // succeeds, nonce → 1
+        gm.setGuardian(address(mockVault), newGuardian, sig);
 
-        // Replay with the same signature (nonce is now 1, sig was for nonce 0)
         vm.expectRevert(GuardianModule.InvalidSignature.selector);
         vm.prank(vaultOwner);
         gm.setGuardian(address(mockVault), newGuardian, sig);
     }
 
-    // ─── setGuardian – renounce (path 3 with newGuardian = address(0)) ────────
+    // ─── setGuardian – renounce ───────────────────────────────────────────────
 
     function test_setGuardian_renounce_withGuardianSignature_succeeds() public {
         uint256 nonce = gm.guardianChangeNonces(address(mockVault));
@@ -214,17 +257,15 @@ contract GuardianModuleUnitTest is Test {
         vm.prank(vaultOwner);
         gm.setGuardian(address(mockVault), address(0), sig);
 
-        assertEq(gm.guardians(address(mockVault)), address(0), "Guardian must be renounced");
+        assertEq(gm.guardians(address(mockVault)), address(0));
     }
 
     function test_setGuardian_postRenounce_ownerCanSetFreely() public {
-        // Renounce guardian
         uint256 nonce = gm.guardianChangeNonces(address(mockVault));
         bytes memory sig = _signGuardianUpdate(address(mockVault), address(0), nonce);
         vm.prank(vaultOwner);
         gm.setGuardian(address(mockVault), address(0), sig);
 
-        // After renounce guardian is address(0) → path 1 applies, no signature needed
         address freshGuardian = makeAddr("freshGuardian");
         vm.prank(vaultOwner);
         gm.setGuardian(address(mockVault), freshGuardian, new bytes(0));
@@ -232,105 +273,85 @@ contract GuardianModuleUnitTest is Test {
         assertEq(gm.guardians(address(mockVault)), freshGuardian);
     }
 
-    // ─── validateWithdrawal – no guardian set (auto-approve) ─────────────────
+    // ─── validateWithdrawal ───────────────────────────────────────────────────
 
     function test_validateWithdrawal_noGuardian_autoApprove() public {
         MockVault vault2 = new MockVault(vaultOwner);
         bool ok = gm.validateWithdrawal(
-            address(vault2), vaultOwner, 100e6, vaultOwner, block.timestamp, new bytes(0)
+            address(vault2), vaultOwner, 100e8, vaultOwner, block.timestamp, new bytes(0)
         );
-        assertTrue(ok, "Should auto-approve when no guardian set");
+        assertTrue(ok);
     }
-
-    // ─── validateWithdrawal – valid signature ────────────────────────────────
 
     function test_validateWithdrawal_validSignature() public {
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline);
-        assertTrue(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig));
+        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline);
+        assertTrue(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig));
     }
 
     function test_validateWithdrawal_validSignature_incrementsNonce() public {
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline);
+        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline);
 
         assertEq(gm.getNonce(address(mockVault), vaultOwner), 0);
-        gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig);
+        gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig);
         assertEq(gm.getNonce(address(mockVault), vaultOwner), 1);
     }
 
-    // ─── validateWithdrawal – invalid signature ───────────────────────────────
-
     function test_validateWithdrawal_wrongSigner_returnsFalse() public {
         uint256 deadline = block.timestamp + 1 hours;
-        uint256 rogueKey = 0xDEAD;
-        bytes32 structHash = keccak256(abi.encode(
-            WITHDRAWAL_TYPEHASH, address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline
-        ));
+        bytes32 structHash = keccak256(abi.encode(WITHDRAWAL_TYPEHASH, address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", gm.getDomainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rogueKey, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xDEAD, digest);
         bytes memory sig = abi.encodePacked(r, s, v);
 
-        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig));
+        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig));
     }
 
     function test_validateWithdrawal_wrongSigner_doesNotIncrementNonce() public {
         uint256 deadline = block.timestamp + 1 hours;
-        uint256 rogueKey = 0xDEAD;
-        bytes32 structHash = keccak256(abi.encode(
-            WITHDRAWAL_TYPEHASH, address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline
-        ));
+        bytes32 structHash = keccak256(abi.encode(WITHDRAWAL_TYPEHASH, address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", gm.getDomainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rogueKey, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xDEAD, digest);
         bytes memory sig = abi.encodePacked(r, s, v);
 
-        gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig);
+        gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig);
         assertEq(gm.getNonce(address(mockVault), vaultOwner), 0);
     }
 
-    // ─── validateWithdrawal – expired deadline ────────────────────────────────
-
     function test_validateWithdrawal_expiredDeadline_returnsFalse() public {
         uint256 deadline = block.timestamp - 1;
-        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline);
-        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig));
+        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline);
+        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig));
     }
-
-    // ─── validateWithdrawal – replay attack ──────────────────────────────────
 
     function test_validateWithdrawal_replayPrevented() public {
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline);
+        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline);
 
-        assertTrue(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig));
-        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig));
+        assertTrue(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig));
+        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig));
     }
-
-    // ─── validateWithdrawal – cross-vault protection ──────────────────────────
 
     function test_validateWithdrawal_crossVaultProtection() public {
         MockVault vault2 = new MockVault(vaultOwner);
         vm.prank(vaultOwner);
-        gm.setGuardian(address(vault2), guardian, new bytes(0)); // initial set on vault2
+        gm.setGuardian(address(vault2), guardian, new bytes(0));
 
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _signWithdrawal(address(vault2), vaultOwner, 100e6, vaultOwner, 0, deadline);
+        bytes memory sig = _signWithdrawal(address(vault2), vaultOwner, 100e8, vaultOwner, 0, deadline);
 
         assertFalse(
-            gm.validateWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, deadline, sig),
+            gm.validateWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, deadline, sig),
             "Signature for vault2 must not be usable for mockVault"
         );
     }
 
-    // ─── validateWithdrawal – amount tampering ────────────────────────────────
-
     function test_validateWithdrawal_amountTampering_returnsFalse() public {
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e6, vaultOwner, 0, deadline);
-        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 999e6, vaultOwner, deadline, sig));
+        bytes memory sig = _signWithdrawal(address(mockVault), vaultOwner, 100e8, vaultOwner, 0, deadline);
+        assertFalse(gm.validateWithdrawal(address(mockVault), vaultOwner, 999e8, vaultOwner, deadline, sig));
     }
-
-    // ─── getNonce / getDomainSeparator ────────────────────────────────────────
 
     function test_getNonce_initiallyZero() public view {
         assertEq(gm.getNonce(address(mockVault), vaultOwner), 0);
@@ -341,23 +362,21 @@ contract GuardianModuleUnitTest is Test {
     }
 }
 
-// ─── Integration tests: PortfolioVault + GuardianModule ──────────────────────
+// ─── Integration: PortfolioVault + GuardianModule ─────────────────────────────
 
 contract GuardianIntegrationTest is Test {
     VaultFactory     internal factory;
     RiskTierRegistry internal registry;
     MockERC20        internal usdc;
+    MockERC20        internal WBTC;
+    MockERC20        internal WETH;
     GuardianModule   internal gm;
+    MockSwapRouter   internal router;
 
     uint256 internal guardianKey = 0xC0FFEE;
     address internal guardian;
-    address internal user = makeAddr("user");
+    address internal user         = makeAddr("user");
     address internal feeRecipient = makeAddr("feeRecipient");
-
-    address internal WBTC = makeAddr("WBTC");
-    address internal WETH = makeAddr("WETH");
-    address internal FEED_WBTC = makeAddr("feed_wbtc");
-    address internal FEED_WETH = makeAddr("feed_weth");
 
     bytes32 internal constant TYPEHASH = keccak256(
         "WithdrawalApproval(address vault,address owner,uint256 amount,address recipient,uint256 nonce,uint256 deadline)"
@@ -367,34 +386,41 @@ contract GuardianIntegrationTest is Test {
 
     function setUp() public {
         guardian = vm.addr(guardianKey);
-        usdc     = new MockERC20();
+        usdc     = new MockERC20("USD Coin", "USDC", 6);
+        WBTC     = new MockERC20("WBTC",     "WBTC", 6);
+        WETH     = new MockERC20("WETH",     "WETH", 6);
+        router   = new MockSwapRouter();
+
         registry = new RiskTierRegistry();
+
+        MockAggregator feedWbtc = new MockAggregator();
+        MockAggregator feedWeth = new MockAggregator();
 
         address[] memory assets  = new address[](2);
         uint256[] memory weights = new uint256[](2);
         address[] memory feeds   = new address[](2);
-        assets[0] = WBTC;  weights[0] = 5_000; feeds[0] = FEED_WBTC;
-        assets[1] = WETH;  weights[1] = 5_000; feeds[1] = FEED_WETH;
+        assets[0] = address(WBTC);  weights[0] = 5_000;  feeds[0] = address(feedWbtc);
+        assets[1] = address(WETH);  weights[1] = 5_000;  feeds[1] = address(feedWeth);
         registry.createTier(0, "Low Risk", assets, weights, feeds);
 
-        factory = new VaultFactory(address(usdc), address(registry), feeRecipient);
-        gm = factory.guardianModule();
+        factory = new VaultFactory(address(router), address(registry), feeRecipient);
+        gm      = factory.guardianModule();
 
         vm.prank(user);
         vault = PortfolioVault(factory.createVault(0, false));
-
-        // Vault has guardianModule set but no guardian EOA registered for it yet.
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────────────────
+    // ─── Helper: deposit ─────────────────────────────────────────────────────
 
-    function _depositUsdc(uint256 amount) internal {
+    function _deposit(uint256 amount) internal {
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(vault), amount);
-        vault.deposit(amount, user);
+        vault.deposit(address(usdc), amount);
         vm.stopPrank();
     }
+
+    // ─── Helper: sign ────────────────────────────────────────────────────────
 
     function _sign(
         address vault_,
@@ -414,53 +440,48 @@ contract GuardianIntegrationTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    // ─── No guardian registered → backward-compatible ────────────────────────
+    // ─── No guardian: withdraws freely ───────────────────────────────────────
 
     function test_withdraw_noGuardianRegistered_succeeds() public {
-        _depositUsdc(1_000e6);
-        uint256 balBefore = usdc.balanceOf(user);
+        _deposit(1_000e6);
+        uint256 shares = vault.balanceOf(user);
         vm.prank(user);
-        vault.withdraw(1_000e6, user, user);
-        assertEq(usdc.balanceOf(user), balBefore + 1_000e6);
+        vault.withdraw(address(usdc), shares, block.timestamp, new bytes(0));
+        assertEq(vault.balanceOf(user), 0);
     }
 
-    function test_withdrawAll_noGuardianRegistered_succeeds() public {
-        _depositUsdc(1_000e6);
-        uint256 balBefore = usdc.balanceOf(user);
-        vm.prank(user);
-        vault.withdrawAll();
-        assertGt(usdc.balanceOf(user), balBefore);
-    }
-
-    // ─── Guardian registered → signature required ────────────────────────────
+    // ─── Guardian registered: signature required ──────────────────────────────
 
     function test_withdraw_withGuardian_validSignature_succeeds() public {
         vm.prank(user);
-        gm.setGuardian(address(vault), guardian, new bytes(0)); // initial set
+        gm.setGuardian(address(vault), guardian, new bytes(0));
 
-        _depositUsdc(1_000e6);
+        _deposit(1_000e6);
 
+        uint256 shares   = vault.balanceOf(user);
+        uint256 usdValue = vault.totalAssets() * shares / vault.totalSupply();
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _sign(address(vault), user, 1_000e6, user, 0, deadline);
+        bytes memory sig = _sign(address(vault), user, usdValue, user, 0, deadline);
 
-        uint256 balBefore = usdc.balanceOf(user);
         vm.prank(user);
-        vault.withdraw(1_000e6, user, user, deadline, sig);
-        assertEq(usdc.balanceOf(user), balBefore + 1_000e6);
+        vault.withdraw(address(usdc), shares, deadline, sig);
+        assertEq(vault.balanceOf(user), 0);
     }
 
     function test_withdraw_withGuardian_validSignature_incrementsNonce() public {
         vm.prank(user);
         gm.setGuardian(address(vault), guardian, new bytes(0));
 
-        _depositUsdc(1_000e6);
+        _deposit(1_000e6);
 
+        uint256 shares   = vault.balanceOf(user) / 2;
+        uint256 usdValue = (vault.totalAssets() + 1) * shares / (vault.totalSupply() + 1);
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _sign(address(vault), user, 500e6, user, 0, deadline);
+        bytes memory sig = _sign(address(vault), user, usdValue, user, 0, deadline);
 
         assertEq(gm.getNonce(address(vault), user), 0);
         vm.prank(user);
-        vault.withdraw(500e6, user, user, deadline, sig);
+        vault.withdraw(address(usdc), shares, deadline, sig);
         assertEq(gm.getNonce(address(vault), user), 1);
     }
 
@@ -468,99 +489,55 @@ contract GuardianIntegrationTest is Test {
         vm.prank(user);
         gm.setGuardian(address(vault), guardian, new bytes(0));
 
-        _depositUsdc(1_000e6);
+        _deposit(1_000e6);
 
+        uint256 shares   = vault.balanceOf(user);
+        uint256 usdValue = (vault.totalAssets() + 1) * shares / (vault.totalSupply() + 1);
         uint256 deadline = block.timestamp + 1 hours;
-        uint256 rogueKey = 0xDEAD;
-        bytes32 structHash = keccak256(abi.encode(TYPEHASH, address(vault), user, 1_000e6, user, 0, deadline));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", gm.getDomainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(rogueKey, digest);
-        bytes memory sig = abi.encodePacked(r, s, v);
+
+        bytes32 structHash = keccak256(abi.encode(TYPEHASH, address(vault), user, usdValue, user, 0, deadline));
+        bytes32 digest     = keccak256(abi.encodePacked("\x19\x01", gm.getDomainSeparator(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xDEAD, digest);
+        bytes memory badSig = abi.encodePacked(r, s, v);
 
         vm.expectRevert(PortfolioVault.GuardianApprovalRequired.selector);
         vm.prank(user);
-        vault.withdraw(1_000e6, user, user, deadline, sig);
+        vault.withdraw(address(usdc), shares, deadline, badSig);
     }
 
     function test_withdraw_withGuardian_expiredSignature_reverts() public {
         vm.prank(user);
         gm.setGuardian(address(vault), guardian, new bytes(0));
 
-        _depositUsdc(1_000e6);
+        _deposit(1_000e6);
 
+        uint256 shares   = vault.balanceOf(user);
+        uint256 usdValue = (vault.totalAssets() + 1) * shares / (vault.totalSupply() + 1);
         uint256 deadline = block.timestamp - 1;
-        bytes memory sig = _sign(address(vault), user, 1_000e6, user, 0, deadline);
+        bytes memory sig = _sign(address(vault), user, usdValue, user, 0, deadline);
 
         vm.expectRevert(PortfolioVault.GuardianApprovalRequired.selector);
         vm.prank(user);
-        vault.withdraw(1_000e6, user, user, deadline, sig);
+        vault.withdraw(address(usdc), shares, deadline, sig);
     }
 
     function test_withdraw_withGuardian_replayPrevented() public {
         vm.prank(user);
         gm.setGuardian(address(vault), guardian, new bytes(0));
 
-        _depositUsdc(1_000e6);
+        _deposit(1_000e6);
 
+        uint256 shares   = vault.balanceOf(user) / 2;
+        uint256 usdValue = (vault.totalAssets() + 1) * shares / (vault.totalSupply() + 1);
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _sign(address(vault), user, 500e6, user, 0, deadline);
+        bytes memory sig = _sign(address(vault), user, usdValue, user, 0, deadline);
 
         vm.prank(user);
-        vault.withdraw(500e6, user, user, deadline, sig);
+        vault.withdraw(address(usdc), shares, deadline, sig);
 
         vm.expectRevert(PortfolioVault.GuardianApprovalRequired.selector);
         vm.prank(user);
-        vault.withdraw(500e6, user, user, deadline, sig);
-    }
-
-    // ─── withdrawAll with guardian ────────────────────────────────────────────
-
-    function test_withdrawAll_withGuardian_validSignature_succeeds() public {
-        vm.prank(user);
-        gm.setGuardian(address(vault), guardian, new bytes(0));
-
-        _depositUsdc(1_000e6);
-
-        uint256 previewedAssets = vault.previewRedeem(vault.balanceOf(user));
-        uint256 deadline = block.timestamp + 1 hours;
-        bytes memory sig = _sign(address(vault), user, previewedAssets, user, 0, deadline);
-
-        uint256 balBefore = usdc.balanceOf(user);
-        vm.prank(user);
-        vault.withdrawAll(deadline, sig);
-        assertGt(usdc.balanceOf(user), balBefore);
-    }
-
-    function test_withdrawAll_withGuardian_invalidSignature_reverts() public {
-        vm.prank(user);
-        gm.setGuardian(address(vault), guardian, new bytes(0));
-
-        _depositUsdc(1_000e6);
-
-        uint256 deadline = block.timestamp + 1 hours;
-        vm.expectRevert(PortfolioVault.GuardianApprovalRequired.selector);
-        vm.prank(user);
-        vault.withdrawAll(deadline, new bytes(0));
-    }
-
-    // ─── Backward-compat overloads ────────────────────────────────────────────
-
-    function test_backwardCompatOverload_withdraw_noGuardian() public {
-        _depositUsdc(1_000e6);
-        uint256 balBefore = usdc.balanceOf(user);
-        vm.prank(user);
-        vault.withdraw(1_000e6, user, user);
-        assertEq(usdc.balanceOf(user), balBefore + 1_000e6);
-    }
-
-    function test_backwardCompatOverload_redeem_noGuardian() public {
-        _depositUsdc(1_000e6);
-        uint256 shares = vault.balanceOf(user);
-        assertGt(shares, 0);
-        uint256 balBefore = usdc.balanceOf(user);
-        vm.prank(user);
-        vault.redeem(shares, user, user);
-        assertGt(usdc.balanceOf(user), balBefore);
+        vault.withdraw(address(usdc), shares, deadline, sig);
     }
 
     // ─── Factory exposes guardian module ─────────────────────────────────────
