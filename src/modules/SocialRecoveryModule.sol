@@ -10,19 +10,25 @@ import {IVault} from "../interfaces/IVault.sol";
  * @title SocialRecoveryModule
  * @notice Gasless social recovery using off-chain EIP-712 guardian signatures.
  *
- *         Flow:
- *         1. Owner calls {setRecoveryConfig} to register guardians and threshold.
- *         2. Guardians sign off-chain (no gas, no transactions) approving either:
+ *         Configuration is IMMUTABLE once set:
+ *         - Owner calls {setRecoveryConfig} ONCE to register guardians and threshold.
+ *         - After first setup, configuration is permanently locked.
+ *         - Cannot be changed, disabled, or removed.
+ *         - Provides ultimate backup even if owner wallet is compromised.
+ *
+ *         Recovery flow:
+ *         1. Guardians sign off-chain (no gas, no transactions) approving either:
  *            - Ownership transfer:  OwnershipRecovery(vault, newOwner, nonce)
  *            - Guardian replacement: GuardianRecovery(vault, newGuardian, nonce)
- *         3. Any caller submits threshold-many signatures in a single transaction:
+ *         2. Any caller submits threshold-many signatures in a single transaction:
  *            - {executeOwnershipRecovery} or {executeGuardianRecovery}
  *            Signatures are verified on-chain; a 48-hour timelock begins.
- *         4. After 48 hours anyone calls {finalizeRecovery} to execute the action.
+ *         3. After 48 hours anyone calls {finalizeRecovery} to execute the action.
  *            Recovery expires 7 days after the timelock opens (if not finalized).
  *
  *         Design decisions:
- *         - No veto function: a compromised owner wallet cannot block recovery.
+ *         - No veto: compromised wallet cannot block recovery.
+ *         - Immutable: attacker cannot change guardians after setup.
  *         - Shared nonce per vault: prevents both action types being active at once.
  *         - Separate typehashes: ownership signatures cannot be reused for guardian changes.
  *         - Nonce increments only on finalization: invalidates all prior signatures.
@@ -67,6 +73,8 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
     mapping(address => RecoveryConfig)  private _configs;
     mapping(address => RecoveryRequest) public  requests;
     mapping(address => uint256)         public  nonces;
+    /// @notice Tracks whether a vault has locked its recovery configuration (immutable after first set).
+    mapping(address => bool)            public  isRecoveryLocked;
 
     // ─── Events ──────────────────────────────────────────────────────────────
 
@@ -82,6 +90,7 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
     error ZeroAddress();
     error InvalidConfig();
     error NoConfig();
+    error RecoveryAlreadyConfigured();
     error RecoveryAlreadyActive();
     error RecoveryNotActive();
     error RecoveryExpired();
@@ -97,8 +106,9 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
     // ─── Config ──────────────────────────────────────────────────────────────
 
     /**
-     * @notice Sets the guardian set and approval threshold for a vault.
-     * @dev Only the current vault owner can configure. Should be called during vault setup.
+     * @notice Sets the guardian set and approval threshold for a vault (ONE TIME ONLY).
+     * @dev Can only be called ONCE per vault. After setup, configuration is permanently locked.
+     *      Owner should carefully choose guardians before calling — cannot be changed later.
      * @param vault     The vault to configure.
      * @param guardians 2–5 unique, non-zero guardian addresses.
      * @param threshold Number of guardian signatures required (min 2).
@@ -109,6 +119,7 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
         uint256 threshold
     ) external override {
         if (IVault(vault).owner() != msg.sender) revert Unauthorized();
+        if (isRecoveryLocked[vault]) revert RecoveryAlreadyConfigured();
         if (guardians.length < 2 || guardians.length > MAX_GUARDIANS) revert InvalidConfig();
         if (threshold < MIN_THRESHOLD || threshold > guardians.length) revert InvalidConfig();
 
@@ -120,6 +131,7 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
         }
 
         _configs[vault] = RecoveryConfig({guardians: guardians, threshold: threshold});
+        isRecoveryLocked[vault] = true;
         emit RecoveryConfigured(vault, guardians, threshold);
     }
 
@@ -231,6 +243,11 @@ contract SocialRecoveryModule is IRecovery, EIP712 {
     /// @notice Returns whether `guardian` is registered for `vault`.
     function isGuardian(address vault, address guardian) external view override returns (bool) {
         return _isGuardian(vault, guardian);
+    }
+
+    /// @notice Returns whether recovery has been configured (and locked) for a vault.
+    function isConfigured(address vault) external view override returns (bool) {
+        return isRecoveryLocked[vault];
     }
 
     /// @notice Returns the full recovery config for a vault.

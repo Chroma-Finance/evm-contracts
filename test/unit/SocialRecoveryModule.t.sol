@@ -193,6 +193,64 @@ contract SocialRecoveryModuleTest is Test {
         recovery.setRecoveryConfig(address(vault), withZero, 2);
     }
 
+    // ─── setRecoveryConfig immutability ──────────────────────────────────────
+
+    function test_setRecoveryConfig_firstTime_locksConfig() public {
+        vm.prank(vaultOwner);
+        recovery.setRecoveryConfig(address(vault), guardians5, threshold3);
+
+        assertTrue(recovery.isRecoveryLocked(address(vault)));
+        assertTrue(recovery.isConfigured(address(vault)));
+    }
+
+    function test_setRecoveryConfig_cannotChangeAfterSet() public {
+        vm.prank(vaultOwner);
+        recovery.setRecoveryConfig(address(vault), guardians5, threshold3);
+
+        address[] memory newGuardians = new address[](3);
+        newGuardians[0] = address(0x111);
+        newGuardians[1] = address(0x222);
+        newGuardians[2] = address(0x333);
+
+        vm.prank(vaultOwner);
+        vm.expectRevert(SocialRecoveryModule.RecoveryAlreadyConfigured.selector);
+        recovery.setRecoveryConfig(address(vault), newGuardians, 2);
+    }
+
+    function test_setRecoveryConfig_cannotDisable() public {
+        vm.prank(vaultOwner);
+        recovery.setRecoveryConfig(address(vault), guardians5, threshold3);
+
+        address[] memory empty = new address[](0);
+
+        vm.prank(vaultOwner);
+        vm.expectRevert(SocialRecoveryModule.RecoveryAlreadyConfigured.selector);
+        recovery.setRecoveryConfig(address(vault), empty, 0);
+    }
+
+    function test_setRecoveryConfig_attackerCannotChange() public {
+        vm.prank(vaultOwner);
+        recovery.setRecoveryConfig(address(vault), guardians5, threshold3);
+
+        address[] memory attackerGuardians = new address[](2);
+        attackerGuardians[0] = makeAddr("attacker1");
+        attackerGuardians[1] = makeAddr("attacker2");
+
+        // Even the owner (e.g., a compromised wallet) cannot change config
+        vm.prank(vaultOwner);
+        vm.expectRevert(SocialRecoveryModule.RecoveryAlreadyConfigured.selector);
+        recovery.setRecoveryConfig(address(vault), attackerGuardians, 2);
+    }
+
+    function test_isConfigured_beforeAndAfter() public {
+        assertFalse(recovery.isConfigured(address(vault)));
+
+        vm.prank(vaultOwner);
+        recovery.setRecoveryConfig(address(vault), guardians5, threshold3);
+
+        assertTrue(recovery.isConfigured(address(vault)));
+    }
+
     // ─── executeOwnershipRecovery ─────────────────────────────────────────────
 
     function test_executeOwnershipRecovery_validSignatures_createsRequest() public {

@@ -535,7 +535,7 @@ contract PortfolioVault is ReentrancyGuard {
      */
     function setGuardianAddress(address newGuardian) external {
         if (msg.sender != vaultOwner && msg.sender != recoveryModule) revert Unauthorized();
-        IGuardian(guardianModule).setGuardian(address(this), newGuardian);
+        IGuardian(guardianModule).setGuardian(address(this), newGuardian, "");
         emit GuardianAddressUpdated(newGuardian);
     }
 

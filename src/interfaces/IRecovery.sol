@@ -38,4 +38,10 @@ interface IRecovery {
 
     /// @notice Returns whether the given address is a registered guardian for the vault.
     function isGuardian(address vault, address guardian) external view returns (bool);
+
+    /// @notice Returns whether recovery configuration is locked (immutable) for a vault.
+    function isRecoveryLocked(address vault) external view returns (bool);
+
+    /// @notice Returns whether recovery has been configured for a vault.
+    function isConfigured(address vault) external view returns (bool);
 }
