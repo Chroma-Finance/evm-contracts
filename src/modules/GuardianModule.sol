@@ -60,14 +60,15 @@ contract GuardianModule is IGuardian, EIP712, Ownable {
      *
      * @dev Three execution paths (checked in order):
      *
-     *   1. No guardian set (guardians[vault] == address(0)):
+     *   1. Called by the vault contract itself (msg.sender == vault):
+     *      Unconditionally trusted — the vault's setGuardianAddress() already
+     *      verified the caller is either the vault owner (initial setup) or
+     *      the registered recoveryModule (recovery rotation). `signature` ignored.
+     *      Applies regardless of whether a guardian is currently set.
+     *
+     *   2. No guardian set (guardians[vault] == address(0)), direct owner call:
      *      Only the vault owner may call. `signature` is ignored.
      *      Used for initial setup or after a guardian has been renounced.
-     *
-     *   2. Called by the vault contract itself (msg.sender == vault):
-     *      Unconditionally trusted — the vault's setGuardianAddress() already
-     *      verified the caller is the registered recoveryModule.
-     *      `signature` is ignored.
      *
      *   3. Guardian already set, called by vault owner:
      *      Requires a valid EIP-712 GuardianUpdate signature from the *current*
@@ -81,16 +82,19 @@ contract GuardianModule is IGuardian, EIP712, Ownable {
     function setGuardian(address vault, address newGuardian, bytes calldata signature) external {
         address current = guardians[vault];
 
-        // ── Path 1: initial set ──────────────────────────────────────────────
-        if (current == address(0)) {
-            if (IVault(vault).owner() != msg.sender) revert Unauthorized();
+        // ── Path 1: vault-mediated call (initial setup OR social recovery) ───
+        // The vault contract is the caller for both PortfolioVault.setGuardianAddress()
+        // flows (owner initial setup and recoveryModule rotation). Both are verified
+        // by the vault before forwarding, so the vault is unconditionally trusted here.
+        if (msg.sender == vault) {
             guardians[vault] = newGuardian;
             emit GuardianSet(vault, newGuardian);
             return;
         }
 
-        // ── Path 2: social recovery (vault contract is the caller) ───────────
-        if (msg.sender == vault) {
+        // ── Path 2: direct initial set (owner calls guardianModule directly) ─
+        if (current == address(0)) {
+            if (IVault(vault).owner() != msg.sender) revert Unauthorized();
             guardians[vault] = newGuardian;
             emit GuardianSet(vault, newGuardian);
             return;

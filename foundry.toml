@@ -23,5 +23,5 @@ arbitrum = "${ARBITRUM_RPC_URL}"
 mainnet = "${MAINNET_RPC_URL}"
 
 [etherscan]
-arbitrum = { key = "${ARBISCAN_API_KEY}", chain = 42161 }
+arbitrum = { key = "${ARBISCAN_API_KEY}", url = "https://api.arbiscan.io/api" }
 mainnet = { key = "${ETHERSCAN_API_KEY}" }

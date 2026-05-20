@@ -45,6 +45,13 @@ contract SwapRouter is Ownable {
     /// @notice Uniswap V3 pool fee tier per sorted token pair.
     mapping(bytes32 => uint24) internal _poolFees;
 
+    /// @notice ABI-packed Uniswap V3 multi-hop path per directed (tokenIn, tokenOut) pair.
+    ///         Non-empty → use exactInput; empty → fall back to exactInputSingle.
+    mapping(bytes32 => bytes) private _swapPaths;
+
+    /// @notice VaultFactory allowed to register new vaults via authorizeVault().
+    address public factory;
+
     /// @notice Vaults authorized to call the batch swap functions.
     mapping(address => bool) public authorizedVaults;
 
@@ -57,10 +64,12 @@ contract SwapRouter is Ownable {
     event Swapped(address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut);
     event PriceFeedSet(address indexed token, address indexed feed);
     event PoolFeeSet(address indexed tokenA, address indexed tokenB, uint24 fee);
+    event SwapPathSet(address indexed tokenIn, address indexed tokenOut, bytes path);
     event VaultAuthorized(address indexed vault);
     event VaultDeauthorized(address indexed vault);
     event TokenWhitelisted(address indexed token);
     event TokenDelisted(address indexed token);
+    event FactorySet(address indexed factory);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -73,6 +82,7 @@ contract SwapRouter is Ownable {
     error InvalidPrice(address token);
     error StalePriceFeed(address token);
     error InsufficientOutput(uint256 minRequired, uint256 received);
+    error InvalidPath();
 
     // ─── Modifier ────────────────────────────────────────────────────────────
 
@@ -103,9 +113,17 @@ contract SwapRouter is Ownable {
         emit PoolFeeSet(tokenA, tokenB, fee);
     }
 
+    /// @notice Set the VaultFactory address permitted to register new vaults.
+    function setFactory(address factory_) external onlyOwner {
+        if (factory_ == address(0)) revert ZeroAddress();
+        factory = factory_;
+        emit FactorySet(factory_);
+    }
+
     /// @notice Authorize a vault to call the batch swap functions.
-    /// @dev Called by VaultFactory each time a new vault is deployed.
-    function authorizeVault(address vault_) external onlyOwner {
+    /// @dev Called by VaultFactory on each createVault(). Owner may also call directly.
+    function authorizeVault(address vault_) external {
+        if (msg.sender != owner() && msg.sender != factory) revert Unauthorized();
         if (vault_ == address(0)) revert ZeroAddress();
         authorizedVaults[vault_] = true;
         emit VaultAuthorized(vault_);
@@ -128,6 +146,24 @@ contract SwapRouter is Ownable {
     function delistToken(address token) external onlyOwner {
         isWhitelistedToken[token] = false;
         emit TokenDelisted(token);
+    }
+
+    /**
+     * @notice Register an ABI-packed Uniswap V3 path for a directed token pair.
+     * @dev    Pass empty bytes to clear an existing path and revert to single-hop.
+     *         Path format: abi.encodePacked(tokenIn, fee1, hop, fee2, ..., tokenOut)
+     *         where each address is 20 bytes and each fee is uint24 (3 bytes).
+     *         Minimum valid path: 43 bytes (single hop, stored but will just call exactInput).
+     *         Two-hop (e.g. USDT→USDC→WBTC): 66 bytes.
+     */
+    function setSwapPath(address tokenIn, address tokenOut, bytes calldata path) external onlyOwner {
+        if (tokenIn == address(0) || tokenOut == address(0)) revert ZeroAddress();
+        if (path.length != 0) {
+            // Valid lengths: 43, 66, 89, ... = 20 + 23*n for n >= 1
+            if (path.length < 43 || (path.length - 20) % 23 != 0) revert InvalidPath();
+        }
+        _swapPaths[_directedHash(tokenIn, tokenOut)] = path;
+        emit SwapPathSet(tokenIn, tokenOut, path);
     }
 
     // ─── Batch swaps (vault only) ─────────────────────────────────────────────
@@ -257,6 +293,11 @@ contract SwapRouter is Ownable {
         return _getPoolFee(tokenA, tokenB);
     }
 
+    /// @notice Returns the registered multi-hop path for a directed pair, or empty bytes if none.
+    function getSwapPath(address tokenIn, address tokenOut) external view returns (bytes memory) {
+        return _swapPaths[_directedHash(tokenIn, tokenOut)];
+    }
+
     // ─── Internal ─────────────────────────────────────────────────────────────
 
     function _executeOracleSwap(
@@ -266,26 +307,41 @@ contract SwapRouter is Ownable {
     ) internal returns (uint256 amountOut) {
         if (tokenIn == tokenOut) revert SameToken();
 
+        // Oracle validation is end-to-end USD in vs USD out — path routing does not affect it.
         uint256 expected = _getExpectedOutput(tokenIn, tokenOut, amountIn);
         uint256 minOut   = expected * (BPS_DENOMINATOR - MAX_SLIPPAGE_BPS) / BPS_DENOMINATOR;
 
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(tokenIn).forceApprove(address(uniswapRouter), amountIn);
 
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
-            tokenIn:           tokenIn,
-            tokenOut:          tokenOut,
-            fee:               _getPoolFee(tokenIn, tokenOut),
-            recipient:         msg.sender,
-            deadline:          block.timestamp,
-            amountIn:          amountIn,
-            amountOutMinimum:  minOut,
-            sqrtPriceLimitX96: 0
-        });
+        bytes memory path = _swapPaths[_directedHash(tokenIn, tokenOut)];
 
-        amountOut = uniswapRouter.exactInputSingle(params);
+        if (path.length > 0) {
+            // Multi-hop: use the registered ABI-packed path (e.g. USDT→USDC→WBTC).
+            ISwapRouter.ExactInputParams memory params = ISwapRouter.ExactInputParams({
+                path:             path,
+                recipient:        msg.sender,
+                deadline:         block.timestamp,
+                amountIn:         amountIn,
+                amountOutMinimum: minOut
+            });
+            amountOut = uniswapRouter.exactInput(params);
+        } else {
+            // Single-hop fallback: direct pool between tokenIn and tokenOut.
+            ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+                tokenIn:           tokenIn,
+                tokenOut:          tokenOut,
+                fee:               _getPoolFee(tokenIn, tokenOut),
+                recipient:         msg.sender,
+                deadline:          block.timestamp,
+                amountIn:          amountIn,
+                amountOutMinimum:  minOut,
+                sqrtPriceLimitX96: 0
+            });
+            amountOut = uniswapRouter.exactInputSingle(params);
+        }
+
         if (amountOut < minOut) revert InsufficientOutput(minOut, amountOut);
-
         emit Swapped(tokenIn, tokenOut, amountIn, amountOut);
     }
 
@@ -330,5 +386,10 @@ contract SwapRouter is Ownable {
     function _pairHash(address tokenA, address tokenB) internal pure returns (bytes32) {
         (address a, address b) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
         return keccak256(abi.encodePacked(a, b));
+    }
+
+    // Order-sensitive hash for directional swap paths (tokenIn→tokenOut ≠ tokenOut→tokenIn).
+    function _directedHash(address tokenIn, address tokenOut) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(tokenIn, tokenOut));
     }
 }
