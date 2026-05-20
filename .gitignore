@@ -41,3 +41,4 @@ yarn.lock
 
 # ─── Claude Code internal state ───────────────────────────────────────────────
 .claude/
+CLAUDE.md
