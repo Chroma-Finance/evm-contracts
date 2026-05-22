@@ -9,6 +9,8 @@ import {SocialRecoveryModule}  from "../src/modules/SocialRecoveryModule.sol";
 import {SwapRouter}            from "../src/utils/SwapRouter.sol";
 import {RiskTierRegistry}      from "../src/utils/RiskTierRegistry.sol";
 import {FeeManager}            from "../src/utils/FeeManager.sol";
+import {ArbitrumForkHelpers} from "./helpers/ArbitrumForkHelpers.s.sol";
+import {IERC20}                from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @notice Deploys and wires the full Chroma Finance protocol on an Arbitrum mainnet fork.
@@ -75,6 +77,11 @@ contract DeployArbitrumFork is Script {
         console2.log("Deployer         :", deployer);
         console2.log("Block            :", block.number);
         console2.log("");
+
+        // // Deal tokens for testing
+        vm.startPrank(0x96d60ded7fF161DD9a8d98df3b32DF229f35B897);
+        IERC20(usdc).transfer(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266, 1_000_000e6);
+        vm.stopPrank();
 
         vm.startBroadcast(deployerKey);
 
@@ -190,6 +197,62 @@ contract DeployArbitrumFork is Script {
         console2.log("EventNotifier    :", address(d.eventNotifier));
         console2.log("GuardianModule   :", address(d.guardianModule));
         console2.log("SocialRecovery   :", address(d.recoveryModule));
+
+        // ── Save deployment manifest ──────────────────────────────────────────
+        _saveDeployment(d, deployer, wbtc, weth, usdc, usdt, dai);
+    }
+
+    function _saveDeployment(
+        Deployments memory d,
+        address deployer,
+        address wbtc,
+        address weth,
+        address usdc,
+        address usdt,
+        address dai
+    ) internal {
+        // Create directories if they don't exist
+        try vm.createDir("deployments", true) {} catch {}
+        try vm.createDir("frontend/src/contracts", true) {} catch {}
+        // contracts object
+        string memory c = "contracts";
+        vm.serializeAddress(c, "VaultFactory",         address(d.factory));
+        vm.serializeAddress(c, "GuardianModule",       address(d.guardianModule));
+        vm.serializeAddress(c, "SocialRecoveryModule", address(d.recoveryModule));
+        vm.serializeAddress(c, "SwapRouter",           address(d.swapRouter));
+        vm.serializeAddress(c, "RiskTierRegistry",     address(d.riskRegistry));
+        vm.serializeAddress(c, "EventNotifier",        address(d.eventNotifier));
+        vm.serializeAddress(c, "FeeManager",           address(d.feeManager));
+        string memory contractsJson = vm.serializeAddress(
+            c, "VaultImplementation", d.factory.vaultImplementation()
+        );
+
+        // tokens object
+        string memory t = "tokens";
+        vm.serializeAddress(t, "USDC", usdc);
+        vm.serializeAddress(t, "USDT", usdt);
+        vm.serializeAddress(t, "DAI",  dai);
+        vm.serializeAddress(t, "WBTC", wbtc);
+        string memory tokensJson = vm.serializeAddress(t, "WETH", weth);
+
+        // root object
+        string memory root = "root";
+        vm.serializeString(root, "network",   "arbitrum-local-fork");
+        vm.serializeUint(root,   "chainId",   block.chainid);
+        vm.serializeUint(root,   "timestamp", block.timestamp);
+        vm.serializeAddress(root, "deployer", deployer);
+        vm.serializeString(root, "contracts", contractsJson);
+        string memory finalJson = vm.serializeString(root, "tokens", tokensJson);
+
+        // Always write the canonical deployments file.
+        vm.writeJson(finalJson, "deployments/local-fork.json");
+        console2.log("Manifest saved to deployments/local-fork.json");
+
+        // Write frontend copy only when the directory already exists.
+        if (vm.isDir("frontend/src/contracts")) {
+            vm.writeJson(finalJson, "frontend/src/contracts/deployed-local.json");
+            console2.log("Manifest saved to frontend/src/contracts/deployed-local.json");
+        }
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────

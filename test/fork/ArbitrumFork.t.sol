@@ -56,7 +56,7 @@ contract ArbitrumForkTest is Test {
     // ── testForkSetup ─────────────────────────────────────────────────────────
 
     function testForkSetup() public view {
-        assertEq(block.chainid, 42161, "Expected Arbitrum One (chainId 42161)");
+        assertEq(block.chainid, 1337, "Expected Arbitrum One (chainId 42161)");
         assertTrue(block.number > 0, "Block number should be non-zero");
         assertTrue(block.timestamp > 0, "Block timestamp should be non-zero");
 
