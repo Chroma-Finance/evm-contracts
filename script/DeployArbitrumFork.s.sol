@@ -10,7 +10,27 @@ import {SwapRouter}            from "../src/utils/SwapRouter.sol";
 import {RiskTierRegistry}      from "../src/utils/RiskTierRegistry.sol";
 import {FeeManager}            from "../src/utils/FeeManager.sol";
 import {ArbitrumForkHelpers} from "./helpers/ArbitrumForkHelpers.s.sol";
-import {IERC20}                from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+// ── Minimal interfaces for the _buyUSDC helper ────────────────────────────────
+
+interface IWETH {
+    function deposit() external payable;
+    function approve(address spender, uint256 amount) external returns (bool);
+}
+
+interface IUniswapV3Router {
+    struct ExactOutputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24  fee;
+        address recipient;
+        uint256 deadline;
+        uint256 amountOut;
+        uint256 amountInMaximum;
+        uint160 sqrtPriceLimitX96;
+    }
+    function exactOutputSingle(ExactOutputSingleParams calldata params) external payable returns (uint256 amountIn);
+}
 
 /**
  * @notice Deploys and wires the full Chroma Finance protocol on an Arbitrum mainnet fork.
@@ -78,12 +98,12 @@ contract DeployArbitrumFork is Script {
         console2.log("Block            :", block.number);
         console2.log("");
 
-        // // Deal tokens for testing
-        vm.startPrank(0x96d60ded7fF161DD9a8d98df3b32DF229f35B897);
-        IERC20(usdc).transfer(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266, 1_000_000e6);
-        vm.stopPrank();
-
         vm.startBroadcast(deployerKey);
+
+        // Buy 1,000 USDC for the deployer via Uniswap V3 (wraps ETH -> WETH -> USDC).
+        // The Anvil fork deployer always starts with plenty of ETH so no faucet is needed.
+        _buyUSDC(uniswapRouter, weth, usdc, deployer, 1_000e6);
+        console2.log("Bought 1,000 USDC for deployer via Uniswap V3");
 
         // ── 1. SwapRouter ─────────────────────────────────────────────────────
         // Wraps Uniswap V3 with Chainlink oracle-validated slippage protection.
@@ -146,6 +166,16 @@ contract DeployArbitrumFork is Script {
         d.swapRouter.setPriceFeed(wbtc, btcUsdFeed);
         d.swapRouter.setPriceFeed(weth, ethUsdFeed);
         console2.log("Price feeds set for WBTC and WETH");
+
+        address usdcUsdFeed = 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3;
+        address usdtUsdFeed = 0x3f3f5dF88dC9F13eac63DF89EC16ef6e7E25DdE7;
+        address daiUsdFeed  = 0xc5C8E77B397E531B8EC06BFb0048328B30E9eCfB;
+
+        d.swapRouter.setPriceFeed(usdc, usdcUsdFeed);
+        d.swapRouter.setPriceFeed(usdt, usdtUsdFeed);
+        d.swapRouter.setPriceFeed(dai,  daiUsdFeed);
+
+        console2.log("Price feeds set for WBTC, WETH, USDC, USDT, DAI");
 
         // Token whitelist — accepted as deposit input or withdrawal output
         d.swapRouter.whitelistToken(usdc);
@@ -259,5 +289,33 @@ contract DeployArbitrumFork is Script {
 
     function _requireNonZero(string memory name_, address addr) internal pure {
         require(addr != address(0), string.concat(name_, " must not be zero address"));
+    }
+
+    // Wraps `1 ETH` into WETH and swaps for exactly `usdcAmount` of USDC via
+    // the Uniswap V3 WETH/USDC 0.05% pool.  Only the WETH actually consumed by
+    // the swap is pulled from the caller; the rest stays in the deployer wallet.
+    function _buyUSDC(
+        address router,
+        address weth,
+        address usdc,
+        address recipient,
+        uint256 usdcAmount
+    ) internal {
+        uint256 ethIn = 1 ether; // well above the cost of 1,000 USDC at any realistic ETH price
+        IWETH(weth).deposit{value: ethIn}();
+        IWETH(weth).approve(router, ethIn);
+
+        IUniswapV3Router(router).exactOutputSingle(
+            IUniswapV3Router.ExactOutputSingleParams({
+                tokenIn:           weth,
+                tokenOut:          usdc,
+                fee:               500, // 0.05% WETH/USDC pool on Arbitrum
+                recipient:         recipient,
+                deadline:          block.timestamp + 300,
+                amountOut:         usdcAmount,
+                amountInMaximum:   ethIn,
+                sqrtPriceLimitX96: 0
+            })
+        );
     }
 }
