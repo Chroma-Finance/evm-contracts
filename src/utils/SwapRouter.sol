@@ -29,7 +29,7 @@ contract SwapRouter is Ownable {
 
     // ─── Constants ───────────────────────────────────────────────────────────
 
-    uint256 public constant MAX_SLIPPAGE_BPS        = 50;
+    uint256 public constant MAX_SLIPPAGE_BPS        = 500; //TODO: change
     uint256 public constant BPS_DENOMINATOR         = 10_000;
     uint8   public constant PRICE_DECIMALS          = 8;
     uint256 public constant PRICE_STALENESS_THRESHOLD = 1 hours;

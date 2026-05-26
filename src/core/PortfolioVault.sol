@@ -62,7 +62,7 @@ contract PortfolioVault is ReentrancyGuard {
     uint256 public constant BPS_DENOMINATOR            = 10_000;
     uint256 public constant SECONDS_PER_YEAR           = 365 days;
     uint8   public constant PRICE_DECIMALS             = 8;
-    uint256 public constant PRICE_STALENESS_THRESHOLD  = 1 hours;
+    uint256 public constant PRICE_STALENESS_THRESHOLD  = 7 days; // TODO: change
     uint256 public constant BOOST_FEE_BPS              = 1_500;
 
     address public feeRecipient;
