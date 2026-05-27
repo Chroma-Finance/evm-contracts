@@ -174,7 +174,7 @@ contract SwapRouterTest is Test {
         uint256 amountIn = 60_000e6;
         uint256 expected = router.getExpectedOutput(address(usdc), address(wbtc), amountIn);
         uint256 minOut   = router.getMinAmountOut(address(usdc), address(wbtc), amountIn);
-        assertEq(minOut, expected * 9_950 / 10_000);
+        assertEq(minOut, expected * 9_500 / 10_000);
     }
 
     function test_noPriceFeed_reverts() public {

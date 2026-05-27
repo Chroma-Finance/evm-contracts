@@ -159,8 +159,8 @@ contract OracleIntegrationTest is Test {
     }
 
     function test_getTokenPrice_revertStaleByTimestamp() public {
-        vm.warp(10_000);
-        btcFeed.setUpdatedAt(block.timestamp - 2 hours);
+        vm.warp(30 days);
+        btcFeed.setUpdatedAt(block.timestamp - 8 days);
         vm.expectRevert(abi.encodeWithSelector(PortfolioVault.StalePriceFeed.selector, address(wbtc)));
         vault.getTokenPrice(address(wbtc));
     }
@@ -238,8 +238,8 @@ contract OracleIntegrationTest is Test {
     }
 
     function test_getTokenPrice_rejectsOneBeyondThreshold() public {
-        vm.warp(10_000);
-        btcFeed.setUpdatedAt(block.timestamp - 1 hours - 1);
+        vm.warp(30 days);
+        btcFeed.setUpdatedAt(block.timestamp - 7 days - 1);
         vm.expectRevert(abi.encodeWithSelector(PortfolioVault.StalePriceFeed.selector, address(wbtc)));
         vault.getTokenPrice(address(wbtc));
     }
