@@ -229,7 +229,7 @@ contract PortfolioVault is ReentrancyGuard {
 
         if (guardianModule != address(0)) {
             bool approved = IGuardian(guardianModule).validateWithdrawal(
-                address(this), msg.sender, usdValue, msg.sender, deadline, signature
+                address(this), msg.sender, shares, msg.sender, deadline, signature
             );
             if (!approved) revert GuardianApprovalRequired();
         }
