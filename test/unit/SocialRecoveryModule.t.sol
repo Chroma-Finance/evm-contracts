@@ -577,8 +577,8 @@ contract SocialRecoveryModuleTest is Test {
 
         // ── Recovery 1: Transfer ownership ──────────────────────────────────
         address newOwner = makeAddr("newOwner");
-        recovery.executeOwnershipRecovery(address(vault), newOwner, _ownershipSigs3(newOwner));
-        vm.warp(block.timestamp + recovery.TIMELOCK_PERIOD());
+        uint256 executeAfter1 = recovery.executeOwnershipRecovery(address(vault), newOwner, _ownershipSigs3(newOwner));
+        vm.warp(executeAfter1 + 1);
         recovery.finalizeRecovery(address(vault));
         assertEq(vault.owner(), newOwner);
         assertEq(recovery.nonces(address(vault)), 1);
@@ -592,8 +592,8 @@ contract SocialRecoveryModuleTest is Test {
         sigs2[1] = _signGuardian(keyB, newGuardian, nonce);
         sigs2[2] = _signGuardian(keyC, newGuardian, nonce);
 
-        recovery.executeGuardianRecovery(address(vault), newGuardian, sigs2);
-        vm.warp(block.timestamp + recovery.TIMELOCK_PERIOD());
+        uint256 executeAfter2 = recovery.executeGuardianRecovery(address(vault), newGuardian, sigs2);
+        vm.warp(executeAfter2 + 1);
         recovery.finalizeRecovery(address(vault));
 
         assertEq(vault.lastGuardianSet(), newGuardian);

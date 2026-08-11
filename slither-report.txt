@@ -1,0 +1,301 @@
+'forge clean' running (wd: /home/dan2xxx/WorkSpace/ChromaFi/evm-contracts)
+'forge config --json' running
+'forge build --build-info --skip ./test/** ./script/** --force' running (wd: /home/dan2xxx/WorkSpace/ChromaFi/evm-contracts)
+INFO:Detectors:
+SwapRouter._getExpectedOutput(address,address,uint256) (src/utils/SwapRouter.sol#348-360) performs a multiplication on the result of a division:
+	- valueUSD = amountIn * priceIn / (10 ** decIn) (src/utils/SwapRouter.sol#358)
+	- expectedOut = valueUSD * (10 ** decOut) / priceOut (src/utils/SwapRouter.sol#359)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
+INFO:Detectors:
+PortfolioVault._accrueManagementFee() (src/core/PortfolioVault.sol#364-381) uses a dangerous strict equality:
+	- elapsed == 0 || _totalSupply == 0 (src/core/PortfolioVault.sol#366)
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) uses a dangerous strict equality:
+	- balance == 0 (src/core/PortfolioVault.sol#426)
+PortfolioVault.previewDirectWithdrawal(address) (src/core/PortfolioVault.sol#339-356) uses a dangerous strict equality:
+	- shares == 0 (src/core/PortfolioVault.sol#344)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Reentrancy in VaultFactory.createVault(uint8,bool) (src/core/VaultFactory.sol#106-142):
+	External calls:
+	- PortfolioVault(vault).initialize(msg.sender,riskTier_,feeRecipient,eventNotifier,address(guardianModule),address(recoveryModule),swapRouter,tokens,weights,feeds) (src/core/VaultFactory.sol#114-125)
+	- EventNotifier(eventNotifier).authorize(vault) (src/core/VaultFactory.sol#127)
+	- IChromaSwapRouter(swapRouter).authorizeVault(vault) (src/core/VaultFactory.sol#131)
+	State variables written after the call(s):
+	- userVaults[msg.sender][riskTier_] = vault (src/core/VaultFactory.sol#134)
+	VaultFactory.userVaults (src/core/VaultFactory.sol#49) can be used in cross function reentrancies:
+	- VaultFactory.createVault(uint8,bool) (src/core/VaultFactory.sol#106-142)
+	- VaultFactory.getUserVault(address,uint8) (src/core/VaultFactory.sol#168-170)
+	- VaultFactory.getUserVaults(address) (src/core/VaultFactory.sol#172-181)
+	- VaultFactory.hasVault(address,uint8) (src/core/VaultFactory.sol#183-185)
+	- VaultFactory.userVaults (src/core/VaultFactory.sol#49)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-1
+INFO:Detectors:
+PortfolioVault._assertWeightsSum(uint256[]).sum (src/core/PortfolioVault.sol#438) is a local variable never initialized
+RiskTierRegistry._validateInputs(address[],uint256[],address[]).sum (src/utils/RiskTierRegistry.sol#230) is a local variable never initialized
+RiskTierRegistry.validateWeights(uint256[]).sum (src/utils/RiskTierRegistry.sol#214) is a local variable never initialized
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#uninitialized-local-variables
+INFO:Detectors:
+PortfolioVault.getTokenPrice(address) (src/core/PortfolioVault.sol#314-331) ignores return value by (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/core/PortfolioVault.sol#318-324)
+PortfolioVault._swapToPortfolio(address,uint256) (src/core/PortfolioVault.sol#444-463) ignores return value by IChromaSwapRouter(swapRouter).swapToPortfolio(inputToken,tokensOut,amountsIn) (src/core/PortfolioVault.sol#462)
+GuardianModule.setGuardian(address,address,bytes) (src/modules/GuardianModule.sol#82-115) ignores return value by (signer,err,None) = ECDSA.tryRecover(digest,signature) (src/modules/GuardianModule.sol#109)
+GuardianModule.validateWithdrawal(address,address,uint256,address,uint256,bytes) (src/modules/GuardianModule.sol#122-150) ignores return value by (signer,err,None) = ECDSA.tryRecover(digest,signature) (src/modules/GuardianModule.sol#145)
+SwapRouter._getTokenPrice(address) (src/utils/SwapRouter.sol#362-379) ignores return value by (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/utils/SwapRouter.sol#366-372)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unused-return
+INFO:Detectors:
+PortfolioVault.initialize(address,uint8,address,address,address,address,address,address[],uint256[],address[]).eventNotifier_ (src/core/PortfolioVault.sol#128) lacks a zero-check on :
+		- eventNotifier = eventNotifier_ (src/core/PortfolioVault.sol#146)
+PortfolioVault.initialize(address,uint8,address,address,address,address,address,address[],uint256[],address[]).guardianModule_ (src/core/PortfolioVault.sol#129) lacks a zero-check on :
+		- guardianModule = guardianModule_ (src/core/PortfolioVault.sol#147)
+PortfolioVault.initialize(address,uint8,address,address,address,address,address,address[],uint256[],address[]).recoveryModule_ (src/core/PortfolioVault.sol#130) lacks a zero-check on :
+		- recoveryModule = recoveryModule_ (src/core/PortfolioVault.sol#148)
+PortfolioVault.initialize(address,uint8,address,address,address,address,address,address[],uint256[],address[]).swapRouter_ (src/core/PortfolioVault.sol#131) lacks a zero-check on :
+		- swapRouter = swapRouter_ (src/core/PortfolioVault.sol#149)
+VaultFactory.constructor(address,address,address).swapRouter_ (src/core/VaultFactory.sol#77) lacks a zero-check on :
+		- swapRouter = swapRouter_ (src/core/VaultFactory.sol#82)
+VaultFactory.setSwapRouter(address).newRouter (src/core/VaultFactory.sol#161) lacks a zero-check on :
+		- swapRouter = newRouter (src/core/VaultFactory.sol#162)
+YieldOptimizer.constructor(address).factory_ (src/modules/YieldOptimizer.sol#39) lacks a zero-check on :
+		- factory = factory_ (src/modules/YieldOptimizer.sol#40)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#missing-zero-address-validation
+INFO:Detectors:
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: balance = IERC20(token).balanceOf(address(this)) (src/core/PortfolioVault.sol#425)
+	Calls stack containing the loop:
+		PortfolioVault.deposit(address,uint256)
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+PortfolioVault.getTokenPrice(address) (src/core/PortfolioVault.sol#314-331) has external calls inside a loop: (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/core/PortfolioVault.sol#318-324)
+	Calls stack containing the loop:
+		PortfolioVault.deposit(address,uint256)
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+		PortfolioVault._calculatePortfolioValue()
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: tokenDec = IERC20Metadata(token).decimals() (src/core/PortfolioVault.sol#432)
+	Calls stack containing the loop:
+		PortfolioVault.deposit(address,uint256)
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: balance = IERC20(token).balanceOf(address(this)) (src/core/PortfolioVault.sol#425)
+	Calls stack containing the loop:
+		PortfolioVault.withdraw(address,uint256,uint256,bytes)
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+PortfolioVault.getTokenPrice(address) (src/core/PortfolioVault.sol#314-331) has external calls inside a loop: (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/core/PortfolioVault.sol#318-324)
+	Calls stack containing the loop:
+		PortfolioVault.withdraw(address,uint256,uint256,bytes)
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+		PortfolioVault._calculatePortfolioValue()
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: tokenDec = IERC20Metadata(token).decimals() (src/core/PortfolioVault.sol#432)
+	Calls stack containing the loop:
+		PortfolioVault.withdraw(address,uint256,uint256,bytes)
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+PortfolioVault._withdrawPortfolioTokens(uint256,address) (src/core/PortfolioVault.sol#487-497) has external calls inside a loop: balance = IERC20(token).balanceOf(address(this)) (src/core/PortfolioVault.sol#491)
+	Calls stack containing the loop:
+		PortfolioVault.withdraw(address,uint256,uint256,bytes)
+PortfolioVault._swapFromPortfolio(uint256,address) (src/core/PortfolioVault.sol#466-484) has external calls inside a loop: balance = IERC20(token).balanceOf(address(this)) (src/core/PortfolioVault.sol#474)
+	Calls stack containing the loop:
+		PortfolioVault.withdraw(address,uint256,uint256,bytes)
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: balance = IERC20(token).balanceOf(address(this)) (src/core/PortfolioVault.sol#425)
+	Calls stack containing the loop:
+		PortfolioVault.totalAssets()
+PortfolioVault.getTokenPrice(address) (src/core/PortfolioVault.sol#314-331) has external calls inside a loop: (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/core/PortfolioVault.sol#318-324)
+	Calls stack containing the loop:
+		PortfolioVault.totalAssets()
+		PortfolioVault._calculatePortfolioValue()
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: tokenDec = IERC20Metadata(token).decimals() (src/core/PortfolioVault.sol#432)
+	Calls stack containing the loop:
+		PortfolioVault.totalAssets()
+PortfolioVault.previewDirectWithdrawal(address) (src/core/PortfolioVault.sol#339-356) has external calls inside a loop: bal = IERC20(portfolio[i].token).balanceOf(address(this)) (src/core/PortfolioVault.sol#353)
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: balance = IERC20(token).balanceOf(address(this)) (src/core/PortfolioVault.sol#425)
+	Calls stack containing the loop:
+		PortfolioVault.accrueManagementFee()
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+PortfolioVault.getTokenPrice(address) (src/core/PortfolioVault.sol#314-331) has external calls inside a loop: (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/core/PortfolioVault.sol#318-324)
+	Calls stack containing the loop:
+		PortfolioVault.accrueManagementFee()
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+		PortfolioVault._calculatePortfolioValue()
+PortfolioVault._calculatePortfolioValue() (src/core/PortfolioVault.sol#421-435) has external calls inside a loop: tokenDec = IERC20Metadata(token).decimals() (src/core/PortfolioVault.sol#432)
+	Calls stack containing the loop:
+		PortfolioVault.accrueManagementFee()
+		PortfolioVault._accrueManagementFee()
+		PortfolioVault.totalAssets()
+SwapRouter._getTokenPrice(address) (src/utils/SwapRouter.sol#362-379) has external calls inside a loop: (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/utils/SwapRouter.sol#366-372)
+	Calls stack containing the loop:
+		SwapRouter.swapToPortfolio(address,address[],uint256[])
+		SwapRouter._executeOracleSwap(address,address,uint256)
+		SwapRouter._getExpectedOutput(address,address,uint256)
+SwapRouter._getExpectedOutput(address,address,uint256) (src/utils/SwapRouter.sol#348-360) has external calls inside a loop: decIn = IERC20Metadata(tokenIn).decimals() (src/utils/SwapRouter.sol#355)
+	Calls stack containing the loop:
+		SwapRouter.swapToPortfolio(address,address[],uint256[])
+		SwapRouter._executeOracleSwap(address,address,uint256)
+SwapRouter._getExpectedOutput(address,address,uint256) (src/utils/SwapRouter.sol#348-360) has external calls inside a loop: decOut = IERC20Metadata(tokenOut).decimals() (src/utils/SwapRouter.sol#356)
+	Calls stack containing the loop:
+		SwapRouter.swapToPortfolio(address,address[],uint256[])
+		SwapRouter._executeOracleSwap(address,address,uint256)
+SwapRouter._executeOracleSwap(address,address,uint256) (src/utils/SwapRouter.sol#303-346) has external calls inside a loop: amountOut = uniswapRouter.exactInput(params) (src/utils/SwapRouter.sol#328)
+	Calls stack containing the loop:
+		SwapRouter.swapToPortfolio(address,address[],uint256[])
+SwapRouter._executeOracleSwap(address,address,uint256) (src/utils/SwapRouter.sol#303-346) has external calls inside a loop: amountOut = uniswapRouter.exactInputSingle(params_scope_0) (src/utils/SwapRouter.sol#341)
+	Calls stack containing the loop:
+		SwapRouter.swapToPortfolio(address,address[],uint256[])
+SwapRouter._getTokenPrice(address) (src/utils/SwapRouter.sol#362-379) has external calls inside a loop: (roundId,answer,None,updatedAt,answeredInRound) = AggregatorV3Interface(feed).latestRoundData() (src/utils/SwapRouter.sol#366-372)
+	Calls stack containing the loop:
+		SwapRouter.swapToInputToken(address[],uint256[],address)
+		SwapRouter._executeOracleSwap(address,address,uint256)
+		SwapRouter._getExpectedOutput(address,address,uint256)
+SwapRouter._getExpectedOutput(address,address,uint256) (src/utils/SwapRouter.sol#348-360) has external calls inside a loop: decIn = IERC20Metadata(tokenIn).decimals() (src/utils/SwapRouter.sol#355)
+	Calls stack containing the loop:
+		SwapRouter.swapToInputToken(address[],uint256[],address)
+		SwapRouter._executeOracleSwap(address,address,uint256)
+SwapRouter._getExpectedOutput(address,address,uint256) (src/utils/SwapRouter.sol#348-360) has external calls inside a loop: decOut = IERC20Metadata(tokenOut).decimals() (src/utils/SwapRouter.sol#356)
+	Calls stack containing the loop:
+		SwapRouter.swapToInputToken(address[],uint256[],address)
+		SwapRouter._executeOracleSwap(address,address,uint256)
+SwapRouter._executeOracleSwap(address,address,uint256) (src/utils/SwapRouter.sol#303-346) has external calls inside a loop: amountOut = uniswapRouter.exactInput(params) (src/utils/SwapRouter.sol#328)
+	Calls stack containing the loop:
+		SwapRouter.swapToInputToken(address[],uint256[],address)
+SwapRouter._executeOracleSwap(address,address,uint256) (src/utils/SwapRouter.sol#303-346) has external calls inside a loop: amountOut = uniswapRouter.exactInputSingle(params_scope_0) (src/utils/SwapRouter.sol#341)
+	Calls stack containing the loop:
+		SwapRouter.swapToInputToken(address[],uint256[],address)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation/#calls-inside-a-loop
+INFO:Detectors:
+Reentrancy in FeeManager.collectFees(address,uint256) (src/utils/FeeManager.sol#86-94):
+	External calls:
+	- IERC20(token).safeTransferFrom(msg.sender,address(this),amount) (src/utils/FeeManager.sol#90)
+	State variables written after the call(s):
+	- collectedFees[token] += amount (src/utils/FeeManager.sol#91)
+Reentrancy in VaultFactory.createVault(uint8,bool) (src/core/VaultFactory.sol#106-142):
+	External calls:
+	- PortfolioVault(vault).initialize(msg.sender,riskTier_,feeRecipient,eventNotifier,address(guardianModule),address(recoveryModule),swapRouter,tokens,weights,feeds) (src/core/VaultFactory.sol#114-125)
+	- EventNotifier(eventNotifier).authorize(vault) (src/core/VaultFactory.sol#127)
+	- IChromaSwapRouter(swapRouter).authorizeVault(vault) (src/core/VaultFactory.sol#131)
+	State variables written after the call(s):
+	- allVaults.push(vault) (src/core/VaultFactory.sol#135)
+	- userTiers[msg.sender].push(riskTier_) (src/core/VaultFactory.sol#136)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-2
+INFO:Detectors:
+Reentrancy in SwapRouter._executeOracleSwap(address,address,uint256) (src/utils/SwapRouter.sol#303-346):
+	External calls:
+	- IERC20(tokenIn).safeTransferFrom(msg.sender,address(this),amountIn) (src/utils/SwapRouter.sol#314)
+	- IERC20(tokenIn).forceApprove(address(uniswapRouter),amountIn) (src/utils/SwapRouter.sol#315)
+	- amountOut = uniswapRouter.exactInput(params) (src/utils/SwapRouter.sol#328)
+	- amountOut = uniswapRouter.exactInputSingle(params_scope_0) (src/utils/SwapRouter.sol#341)
+	Event emitted after the call(s):
+	- Swapped(tokenIn,tokenOut,amountIn,amountOut) (src/utils/SwapRouter.sol#345)
+Reentrancy in FeeManager.collectFees(address,uint256) (src/utils/FeeManager.sol#86-94):
+	External calls:
+	- IERC20(token).safeTransferFrom(msg.sender,address(this),amount) (src/utils/FeeManager.sol#90)
+	Event emitted after the call(s):
+	- FeesCollected(token,msg.sender,amount) (src/utils/FeeManager.sol#93)
+Reentrancy in FeeManager.distributeFees(address) (src/utils/FeeManager.sol#102-115):
+	External calls:
+	- IERC20(token).safeTransfer(treasury,treasuryAmount) (src/utils/FeeManager.sol#111)
+	- IERC20(token).safeTransfer(devFund,devAmount) (src/utils/FeeManager.sol#112)
+	Event emitted after the call(s):
+	- FeesDistributed(token,treasuryAmount,devAmount) (src/utils/FeeManager.sol#114)
+Reentrancy in SocialRecoveryModule.finalizeRecovery(address) (src/modules/SocialRecoveryModule.sol#222-239):
+	External calls:
+	- IVault(vault).transferOwnershipFromRecovery(req.targetAddress) (src/modules/SocialRecoveryModule.sol#233)
+	Event emitted after the call(s):
+	- OwnershipRecoveryExecuted(vault,req.targetAddress) (src/modules/SocialRecoveryModule.sol#234)
+Reentrancy in SocialRecoveryModule.finalizeRecovery(address) (src/modules/SocialRecoveryModule.sol#222-239):
+	External calls:
+	- IVault(vault).setGuardianAddress(req.targetAddress) (src/modules/SocialRecoveryModule.sol#236)
+	Event emitted after the call(s):
+	- GuardianRecoveryExecuted(vault,req.targetAddress) (src/modules/SocialRecoveryModule.sol#237)
+Reentrancy in PortfolioVault.setGuardianAddress(address) (src/core/PortfolioVault.sol#286-295):
+	External calls:
+	- IGuardian(guardianModule).setGuardian(address(this),newGuardian,) (src/core/PortfolioVault.sol#293)
+	Event emitted after the call(s):
+	- GuardianAddressUpdated(newGuardian) (src/core/PortfolioVault.sol#294)
+Reentrancy in SwapRouter.swapExactInputMultihop(bytes,address,address,uint256,uint256) (src/utils/SwapRouter.sol#248-271):
+	External calls:
+	- IERC20(tokenIn).safeTransferFrom(msg.sender,address(this),amountIn) (src/utils/SwapRouter.sol#258)
+	- IERC20(tokenIn).forceApprove(address(uniswapRouter),amountIn) (src/utils/SwapRouter.sol#259)
+	- amountOut = uniswapRouter.exactInput(params) (src/utils/SwapRouter.sol#269)
+	Event emitted after the call(s):
+	- Swapped(tokenIn,tokenOut,amountIn,amountOut) (src/utils/SwapRouter.sol#270)
+Reentrancy in SwapRouter.swapExactInputSingle(address,address,uint24,uint256,uint256) (src/utils/SwapRouter.sol#217-243):
+	External calls:
+	- IERC20(tokenIn).safeTransferFrom(msg.sender,address(this),amountIn) (src/utils/SwapRouter.sol#227)
+	- IERC20(tokenIn).forceApprove(address(uniswapRouter),amountIn) (src/utils/SwapRouter.sol#228)
+	- amountOut = uniswapRouter.exactInputSingle(params) (src/utils/SwapRouter.sol#241)
+	Event emitted after the call(s):
+	- Swapped(tokenIn,tokenOut,amountIn,amountOut) (src/utils/SwapRouter.sol#242)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+INFO:Detectors:
+PortfolioVault.getTokenPrice(address) (src/core/PortfolioVault.sol#314-331) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp - updatedAt > PRICE_STALENESS_THRESHOLD (src/core/PortfolioVault.sol#328)
+PortfolioVault.previewDirectWithdrawal(address) (src/core/PortfolioVault.sol#339-356) uses timestamp for comparisons
+	Dangerous comparisons:
+	- shares == 0 (src/core/PortfolioVault.sol#344)
+PortfolioVault._accrueManagementFee() (src/core/PortfolioVault.sol#364-381) uses timestamp for comparisons
+	Dangerous comparisons:
+	- elapsed == 0 || _totalSupply == 0 (src/core/PortfolioVault.sol#366)
+	- feeShares > 0 (src/core/PortfolioVault.sol#373)
+PortfolioVault._swapFromPortfolio(uint256,address) (src/core/PortfolioVault.sol#466-484) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > 0 (src/core/PortfolioVault.sol#478)
+PortfolioVault._withdrawPortfolioTokens(uint256,address) (src/core/PortfolioVault.sol#487-497) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > 0 (src/core/PortfolioVault.sol#493)
+GuardianModule.validateWithdrawal(address,address,uint256,address,uint256,bytes) (src/modules/GuardianModule.sol#122-150) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > deadline (src/modules/GuardianModule.sol#130)
+SocialRecoveryModule.finalizeRecovery(address) (src/modules/SocialRecoveryModule.sol#222-239) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < req.executeAfter (src/modules/SocialRecoveryModule.sol#226)
+	- block.timestamp > req.executeAfter + MAX_RECOVERY_DURATION (src/modules/SocialRecoveryModule.sol#227)
+SocialRecoveryModule.getRecoveryStatus(address) (src/modules/SocialRecoveryModule.sol#260-272) uses timestamp for comparisons
+	Dangerous comparisons:
+	- isExpired = req.targetAddress != address(0) && ! req.executed && block.timestamp > req.executeAfter + MAX_RECOVERY_DURATION (src/modules/SocialRecoveryModule.sol#268-270)
+SocialRecoveryModule._requireNoActiveRecovery(address) (src/modules/SocialRecoveryModule.sol#282-288) uses timestamp for comparisons
+	Dangerous comparisons:
+	- canOverride = req.targetAddress == address(0) || req.executed || block.timestamp > req.executeAfter + MAX_RECOVERY_DURATION (src/modules/SocialRecoveryModule.sol#284-286)
+SwapRouter._executeOracleSwap(address,address,uint256) (src/utils/SwapRouter.sol#303-346) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amountOut < minOut (src/utils/SwapRouter.sol#344)
+SwapRouter._getTokenPrice(address) (src/utils/SwapRouter.sol#362-379) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp - updatedAt > PRICE_STALENESS_THRESHOLD (src/utils/SwapRouter.sol#376)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Detectors:
+Version constraint 0.8.20 contains known severe issues (https://solidity.readthedocs.io/en/latest/bugs.html)
+	- VerbatimInvalidDeduplication
+	- FullInlinerNonExpressionSplitArgumentEvaluationOrder
+	- MissingSideEffectsOnSelectorAccess.
+It is used by:
+	- 0.8.20 (src/core/EventNotifier.sol#2)
+	- 0.8.20 (src/core/PortfolioVault.sol#2)
+	- 0.8.20 (src/core/VaultFactory.sol#2)
+	- 0.8.20 (src/interfaces/IEventNotifier.sol#2)
+	- 0.8.20 (src/interfaces/IGuardian.sol#2)
+	- 0.8.20 (src/interfaces/IRecovery.sol#2)
+	- 0.8.20 (src/interfaces/ISwapRouter.sol#2)
+	- 0.8.20 (src/interfaces/IVault.sol#2)
+	- 0.8.20 (src/modules/GuardianModule.sol#2)
+	- 0.8.20 (src/modules/SocialRecoveryModule.sol#2)
+	- 0.8.20 (src/modules/YieldOptimizer.sol#2)
+	- 0.8.20 (src/utils/FeeManager.sol#2)
+	- 0.8.20 (src/utils/RiskTierRegistry.sol#2)
+	- 0.8.20 (src/utils/SwapRouter.sol#2)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#incorrect-versions-of-solidity
+INFO:Detectors:
+EventNotifier (src/core/EventNotifier.sol#22-175) should inherit from IEventNotifier (src/interfaces/IEventNotifier.sol#4-11)
+SwapRouter (src/utils/SwapRouter.sol#27-395) should inherit from IChromaSwapRouter (src/interfaces/ISwapRouter.sol#5-26)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#missing-inheritance
+INFO:Detectors:
+Loop condition i < portfolio.length (src/core/PortfolioVault.sol#422) should use cached array length instead of referencing `length` member of the storage array.
+ Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#cache-array-length
+INFO:Detectors:
+VaultFactory.eventNotifier (src/core/VaultFactory.sol#40) should be immutable 
+VaultFactory.guardianModule (src/core/VaultFactory.sol#43) should be immutable 
+VaultFactory.recoveryModule (src/core/VaultFactory.sol#46) should be immutable 
+VaultFactory.riskRegistry (src/core/VaultFactory.sol#34) should be immutable 
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#state-variables-that-could-be-declared-immutable
+INFO:Slither:. analyzed (35 contracts with 100 detectors), 74 result(s) found

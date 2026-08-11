@@ -103,6 +103,9 @@ contract MockSwapRouter is IChromaSwapRouter {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 contract VaultFactoryMultiTierTest is Test {
+    // Mirror EventNotifier.VaultCreated for vm.expectEmit
+    event VaultCreated(address indexed user, address indexed vault, uint8 indexed tier, uint256 timestamp);
+
     VaultFactory     internal factory;
     RiskTierRegistry internal registry;
     MockSwapRouter   internal router;
@@ -366,5 +369,35 @@ contract VaultFactoryMultiTierTest is Test {
         vm.prank(userA);
         vm.expectRevert(PortfolioVault.ZeroAmount.selector);
         PortfolioVault(vault).withdraw(address(0), 0, block.timestamp, new bytes(0));
+    }
+
+    // ─── Branch coverage additions ────────────────────────────────────────────
+
+    function test_createVault_tierNotRegistered_reverts() public {
+        vm.prank(userA);
+        vm.expectRevert(RiskTierRegistry.TierNotFound.selector);
+        factory.createVault(99, false);
+    }
+
+    function test_createVault_emitsVaultCreatedEvent() public {
+        // Check user (topic1) and tier (topic3); vault address is unknown before creation.
+        vm.expectEmit(true, false, true, false, factory.eventNotifier());
+        emit VaultCreated(userA, address(0), 0, 0);
+
+        vm.prank(userA);
+        factory.createVault(0, false);
+    }
+
+    function test_getUserVault_returnsZeroForNonExistent() public {
+        assertEq(factory.getUserVault(userA, 0), address(0));
+    }
+
+    function test_getAllVaults_emptyWhenNoVaults() public {
+        address[] memory vaults = factory.getAllVaults(0, 100);
+        assertEq(vaults.length, 0);
+    }
+
+    function test_swapRouter_addressStoredCorrectly() public {
+        assertEq(factory.swapRouter(), address(router));
     }
 }

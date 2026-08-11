@@ -1,18 +1,18 @@
 {
-  "chainId": 1337,
+  "chainId": 42161,
   "contracts": {
-    "EventNotifier": "0x8b77b047dB446BE4d6aCBc5BC49297DE2Dab768F",
-    "FeeManager": "0x10587895313D365bB26fAB830E925bf021851738",
-    "GuardianModule": "0xB652A99B9C526590090fA164A0473Df77F1EfD85",
-    "RiskTierRegistry": "0xb519Df32D51b9905928de40ae0119113C2a0a139",
-    "SocialRecoveryModule": "0x993522600E90EA64D0b9e9D64372D15D8c5ABc4C",
-    "SwapRouter": "0xd04E1bEC2591718fe3DE42Bada5f7927007592CB",
-    "VaultFactory": "0xfBBeFB950B26EB363b3D8B83891f6ee01EAE3854",
-    "VaultImplementation": "0x24026406E9b4e94ad39b57b55A859c3F88d423BA"
+    "EventNotifier": "0xAb003AE9976371Ca0E92cB1080072a4A086f69d9",
+    "FeeManager": "0x3645a104b8604d9b5B84B9EEF09f73585Ca32128",
+    "GuardianModule": "0x7a4D85069323EB79f1169A35354aA578Aec15ea0",
+    "RiskTierRegistry": "0x4127f32B7f66593c31A3444aA061aD97D880be82",
+    "SocialRecoveryModule": "0xAE72B411e2617645e843dDA2fE8122523ACc9148",
+    "SwapRouter": "0xdc180d20bE9cda43302c69baA6D1d001ad443B15",
+    "VaultFactory": "0xCff1c71006Eaf94725f8400f9414153a4e5eb510",
+    "VaultImplementation": "0x74ADCE0A3ea783684Acd7ab05F213892808955e8"
   },
   "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
   "network": "arbitrum-local-fork",
-  "timestamp": 1780063033,
+  "timestamp": 1786455532,
   "tokens": {
     "DAI": "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",
     "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",

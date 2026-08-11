@@ -111,6 +111,10 @@ contract VaultFactory is Ownable {
 
         vault = vaultImplementation.clone();
 
+        userVaults[msg.sender][riskTier_] = vault;
+        allVaults.push(vault);
+        userTiers[msg.sender].push(riskTier_);
+
         PortfolioVault(vault).initialize(
             msg.sender,
             riskTier_,
@@ -130,10 +134,6 @@ contract VaultFactory is Ownable {
         if (swapRouter != address(0)) {
             IChromaSwapRouter(swapRouter).authorizeVault(vault);
         }
-
-        userVaults[msg.sender][riskTier_] = vault;
-        allVaults.push(vault);
-        userTiers[msg.sender].push(riskTier_);
 
         // TODO: If enableBoost, register vault with YieldOptimizer.
         (enableBoost);

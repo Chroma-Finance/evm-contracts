@@ -355,8 +355,7 @@ contract SwapRouter is Ownable {
         uint8   decIn    = IERC20Metadata(tokenIn).decimals();
         uint8   decOut   = IERC20Metadata(tokenOut).decimals();
 
-        uint256 valueUSD = amountIn * priceIn / (10 ** decIn);
-        expectedOut = valueUSD * (10 ** decOut) / priceOut;
+        expectedOut = amountIn * priceIn * (10 ** decOut) / (10 ** decIn) / priceOut;
     }
 
     function _getTokenPrice(address token) internal view returns (uint256 price) {
