@@ -36,6 +36,18 @@ interface IGuardian {
     /// @notice Returns the current withdrawal nonce for a vault/owner pair.
     function getNonce(address vault, address owner) external view returns (uint256);
 
+    /// @notice Validates an EIP-712 guardian signature for Boost entry. Increments nonce on success.
+    /// @dev Auto-approves (returns true) when no guardian is set for `vault`.
+    function validateBoostEntry(
+        address vault,
+        address owner,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (bool);
+
+    /// @notice Returns the current Boost entry approval nonce for a vault/owner pair.
+    function getBoostNonce(address vault, address owner) external view returns (uint256);
+
     /// @notice Returns the EIP-712 domain separator.
     function getDomainSeparator() external view returns (bytes32);
 

@@ -5,7 +5,6 @@ import {Script, console2} from "forge-std/Script.sol";
 import {VaultFactory} from "../src/core/VaultFactory.sol";
 import {GuardianModule} from "../src/modules/GuardianModule.sol";
 import {SocialRecoveryModule} from "../src/modules/SocialRecoveryModule.sol";
-import {YieldOptimizer} from "../src/modules/YieldOptimizer.sol";
 import {SwapRouter} from "../src/utils/SwapRouter.sol";
 import {FeeManager} from "../src/utils/FeeManager.sol";
 import {RiskTierRegistry} from "../src/utils/RiskTierRegistry.sol";
@@ -82,8 +81,9 @@ contract DeployScript is Script {
         console2.log("VaultFactory     :", address(factory));
 
         // 3. Deploy optional/module contracts
-        YieldOptimizer optimizer = new YieldOptimizer(address(factory));
-        console2.log("YieldOptimizer   :", address(optimizer));
+        // NOTE: Boost (YieldOptimizerCore + a concrete strategy, e.g. UniswapV3LPStrategy) is
+        // tier-specific — it needs a real Uniswap V3 pool/position manager/tick range per
+        // strategy — so it is deployed and wired per-tier separately, not here.
 
         GuardianModule guardian = new GuardianModule();
         console2.log("GuardianModule   :", address(guardian));

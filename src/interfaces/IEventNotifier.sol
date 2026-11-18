@@ -8,4 +8,6 @@ interface IEventNotifier {
     function emitPerformanceFee(address vault, uint8 tier, address user, uint256 feeAssets, uint256 vaultTotalAssets) external;
     function emitBoostFee(address vault, uint8 tier, uint256 feeAmount, uint256 vaultTotalAssets) external;
     function emitVaultCreated(address user, address vault, uint8 tier) external;
+    function emitBoostEntered(address user, address vault, uint8 tier, uint256[] calldata amounts) external;
+    function emitBoostExited(address user, address vault, uint8 tier, uint256[] calldata amounts) external;
 }

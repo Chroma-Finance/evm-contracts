@@ -79,6 +79,22 @@ contract EventNotifier is Ownable {
         uint256 timestamp
     );
 
+    event BoostEntered(
+        address indexed user,
+        address indexed vault,
+        uint8 indexed tier,
+        uint256[] amounts,
+        uint256 timestamp
+    );
+
+    event BoostExited(
+        address indexed user,
+        address indexed vault,
+        uint8 indexed tier,
+        uint256[] amounts,
+        uint256 timestamp
+    );
+
     // ─── Admin events ────────────────────────────────────────────────────────
 
     event EmitterAuthorized(address indexed emitter);
@@ -171,5 +187,23 @@ contract EventNotifier is Ownable {
         uint8 tier
     ) external onlyAuthorized {
         emit VaultCreated(user, vault, tier, block.timestamp);
+    }
+
+    function emitBoostEntered(
+        address user,
+        address vault,
+        uint8 tier,
+        uint256[] calldata amounts
+    ) external onlyAuthorized {
+        emit BoostEntered(user, vault, tier, amounts, block.timestamp);
+    }
+
+    function emitBoostExited(
+        address user,
+        address vault,
+        uint8 tier,
+        uint256[] calldata amounts
+    ) external onlyAuthorized {
+        emit BoostExited(user, vault, tier, amounts, block.timestamp);
     }
 }

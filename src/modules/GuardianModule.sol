@@ -32,6 +32,13 @@ contract GuardianModule is IGuardian, EIP712, Ownable {
         "GuardianUpdate(address vault,address newGuardian,uint256 nonce)"
     );
 
+    /// @dev Deliberately has no amount/recipient field, unlike WithdrawalApproval — Boost
+    ///      entry moves the vault's full balance internally, nothing leaves the protocol, so
+    ///      there's nothing to tamper with beyond vault/owner/nonce/deadline.
+    bytes32 public constant BOOST_APPROVAL_TYPEHASH = keccak256(
+        "BoostApproval(address vault,address owner,uint256 nonce,uint256 deadline)"
+    );
+
     // ─── State ───────────────────────────────────────────────────────────────
 
     /// @notice Guardian EOA per vault (address(0) = disabled).
@@ -42,6 +49,9 @@ contract GuardianModule is IGuardian, EIP712, Ownable {
 
     /// @notice Nonce for guardian change / renounce operations (per vault).
     mapping(address => uint256) public guardianChangeNonces;
+
+    /// @notice Boost entry approval nonce per vault per owner (replay protection).
+    mapping(address => mapping(address => uint256)) public boostNonces;
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -152,6 +162,40 @@ contract GuardianModule is IGuardian, EIP712, Ownable {
     /// @notice Returns current withdrawal nonce for a vault/owner pair.
     function getNonce(address vault, address owner) external view returns (uint256) {
         return nonces[vault][owner];
+    }
+
+    /**
+     * @notice Validate guardian signature for Boost entry.
+     * @dev Returns true immediately if no guardian is set (auto-approve).
+     *      Returns false (not revert) on expired deadline or bad signature.
+     *      Unlike {validateWithdrawal}, exitBoost() has no equivalent — exiting Boost is
+     *      ungated, only entering it requires guardian approval when a guardian is set.
+     */
+    function validateBoostEntry(
+        address vault,
+        address owner,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (bool) {
+        if (block.timestamp > deadline) return false;
+
+        address guardian = guardians[vault];
+        if (guardian == address(0)) return true;
+
+        bytes32 digest = _hashTypedDataV4(keccak256(abi.encode(
+            BOOST_APPROVAL_TYPEHASH, vault, owner, boostNonces[vault][owner], deadline
+        )));
+
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        if (err != ECDSA.RecoverError.NoError || signer != guardian) return false;
+
+        boostNonces[vault][owner]++;
+        return true;
+    }
+
+    /// @notice Returns current Boost entry approval nonce for a vault/owner pair.
+    function getBoostNonce(address vault, address owner) external view returns (uint256) {
+        return boostNonces[vault][owner];
     }
 
     /// @notice Returns the EIP-712 domain separator.

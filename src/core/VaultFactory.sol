@@ -9,6 +9,7 @@ import {RiskTierRegistry} from "../utils/RiskTierRegistry.sol";
 import {GuardianModule} from "../modules/GuardianModule.sol";
 import {SocialRecoveryModule} from "../modules/SocialRecoveryModule.sol";
 import {IChromaSwapRouter} from "../interfaces/ISwapRouter.sol";
+import {ITierYieldRouter} from "../interfaces/ITierYieldRouter.sol";
 
 /**
  * @title VaultFactory
@@ -54,11 +55,15 @@ contract VaultFactory is Ownable {
     /// @notice Tracks which tier IDs a user has deployed vaults for (for enumeration).
     mapping(address => uint8[]) private userTiers;
 
+    /// @notice Boost routing gateway per tier (address(0) = Boost not yet wired for that tier).
+    mapping(uint8 => address) public tierYieldRouters;
+
     // ─── Events ──────────────────────────────────────────────────────────────
 
     event ImplementationUpgraded(address indexed oldImpl, address indexed newImpl);
     event FeeRecipientUpdated(address indexed newRecipient);
     event SwapRouterUpdated(address indexed newRouter);
+    event TierYieldRouterUpdated(uint8 indexed tier, address indexed router);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -100,7 +105,8 @@ contract VaultFactory is Ownable {
      * @dev Each user may have at most one vault per tier. Reverts if one already exists.
      *      The vault is fully initialized with immutable references to all shared modules.
      * @param riskTier_   Risk tier index (0=Low, 1=Medium, 2=High).
-     * @param enableBoost Whether the YieldOptimizer boost module is enabled (TODO: wire up).
+     * @param enableBoost Whether to wire this vault into the tier's configured Boost router
+     *                    (no-op if the tier has none configured yet).
      * @return vault      Address of the newly deployed vault.
      */
     function createVault(uint8 riskTier_, bool enableBoost) external returns (address vault) {
@@ -115,6 +121,8 @@ contract VaultFactory is Ownable {
         allVaults.push(vault);
         userTiers[msg.sender].push(riskTier_);
 
+        address router = enableBoost ? tierYieldRouters[riskTier_] : address(0);
+
         PortfolioVault(vault).initialize(
             msg.sender,
             riskTier_,
@@ -123,6 +131,8 @@ contract VaultFactory is Ownable {
             address(guardianModule),
             address(recoveryModule),
             swapRouter,
+            router,     // yieldOptimizer — this tier's TierYieldRouter, if configured
+            0,          // minBoostAmountUsd — unused while yieldOptimizer is unset
             tokens,
             weights,
             feeds
@@ -135,8 +145,11 @@ contract VaultFactory is Ownable {
             IChromaSwapRouter(swapRouter).authorizeVault(vault);
         }
 
-        // TODO: If enableBoost, register vault with YieldOptimizer.
-        (enableBoost);
+        // Register vault with the tier's Boost router, if one is wired up. Skipped entirely
+        // for tiers without Boost configured yet — must not revert vault creation.
+        if (router != address(0)) {
+            ITierYieldRouter(router).registerVault(vault);
+        }
 
         EventNotifier(eventNotifier).emitVaultCreated(msg.sender, vault, riskTier_);
     }
@@ -161,6 +174,14 @@ contract VaultFactory is Ownable {
     function setSwapRouter(address newRouter) external onlyOwner {
         swapRouter = newRouter;
         emit SwapRouterUpdated(newRouter);
+    }
+
+    /// @notice Wires (or unwires) the Boost router applied to newly created vaults of `tier`.
+    /// @dev `router` may be address(0) to leave/return the tier without Boost. Only affects
+    ///      vaults created after this call — existing vaults' `yieldOptimizer` is immutable.
+    function setTierYieldRouter(uint8 tier, address router) external onlyOwner {
+        tierYieldRouters[tier] = router;
+        emit TierYieldRouterUpdated(tier, router);
     }
 
     // ─── Views ───────────────────────────────────────────────────────────────

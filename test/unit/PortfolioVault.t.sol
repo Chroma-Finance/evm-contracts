@@ -124,6 +124,7 @@ contract PortfolioVaultTest is Test {
             address(0),          // guardianModule — auto-approve
             address(0),          // recoveryModule
             address(mockRouter),
+            address(0), 0,       // yieldOptimizer, minBoostAmountUsd — Boost unavailable
             tokens, weights, feeds
         );
     }
@@ -146,7 +147,7 @@ contract PortfolioVaultTest is Test {
 
         vm.expectRevert(PortfolioVault.AlreadyInitialized.selector);
         vault.initialize(vaultOwner, 0, feeRecipient, address(0), address(0), address(0),
-                         address(mockRouter), tokens, weights, feeds);
+                         address(mockRouter), address(0), 0, tokens, weights, feeds);
     }
 
     function test_initialize_zeroOwner_reverts() public {
@@ -158,7 +159,7 @@ contract PortfolioVaultTest is Test {
 
         vm.expectRevert(PortfolioVault.ZeroAddress.selector);
         v2.initialize(address(0), 0, feeRecipient, address(0), address(0), address(0),
-                      address(mockRouter), tokens, weights, feeds);
+                      address(mockRouter), address(0), 0, tokens, weights, feeds);
     }
 
     function test_initialize_invalidWeightSum_reverts() public {
@@ -170,7 +171,7 @@ contract PortfolioVaultTest is Test {
 
         vm.expectRevert(PortfolioVault.InvalidWeights.selector);
         v2.initialize(vaultOwner, 0, feeRecipient, address(0), address(0), address(0),
-                      address(mockRouter), tokens, weights, feeds);
+                      address(mockRouter), address(0), 0, tokens, weights, feeds);
     }
 
     function test_initialize_setsRiskTierAndOwner() public view {
@@ -201,6 +202,7 @@ contract PortfolioVaultTest is Test {
         tokens[0] = address(foo); weights[0] = 10_000; feeds[0] = address(fooFeed);
         noRouter.initialize(vaultOwner, 0, feeRecipient, address(0), address(0), address(0),
                             address(0), // no router
+                            address(0), 0, // yieldOptimizer, minBoostAmountUsd
                             tokens, weights, feeds);
 
         usdc.mint(vaultOwner, DEPOSIT_AMOUNT);
@@ -371,7 +373,7 @@ contract PortfolioVaultTest is Test {
         address[] memory feeds   = new address[](1);
         tokens[0] = address(foo); weights[0] = 10_000; feeds[0] = address(fooFeed);
         v2.initialize(vaultOwner, 0, feeRecipient, address(0), address(0), recoveryMod,
-                      address(mockRouter), tokens, weights, feeds);
+                      address(mockRouter), address(0), 0, tokens, weights, feeds);
 
         address newOwner = makeAddr("newOwner");
         vm.prank(recoveryMod);
@@ -390,7 +392,7 @@ contract PortfolioVaultTest is Test {
         address[] memory feeds   = new address[](1);
         tokens[0] = address(foo); weights[0] = 10_000; feeds[0] = address(fooFeed);
         v2.initialize(vaultOwner, 0, feeRecipient, address(0), address(0), recoveryMod,
-                      address(mockRouter), tokens, weights, feeds);
+                      address(mockRouter), address(0), 0, tokens, weights, feeds);
 
         vm.prank(recoveryMod);
         vm.expectRevert(PortfolioVault.ZeroAddress.selector);
@@ -438,7 +440,7 @@ contract PortfolioVaultTest is Test {
         tokens[0] = address(foo); weights[0] = 5_000; feeds[0] = address(fooFeed);
         tokens[1] = address(bar); weights[1] = 5_000; feeds[1] = address(barFeed);
         v2.initialize(vaultOwner, 1, feeRecipient, address(0), address(0), address(0),
-                      address(mockRouter), tokens, weights, feeds);
+                      address(mockRouter), address(0), 0, tokens, weights, feeds);
 
         // Deposit 1000e6: 500e6 FOO + 500e6 BAR
         usdc.mint(vaultOwner, DEPOSIT_AMOUNT);

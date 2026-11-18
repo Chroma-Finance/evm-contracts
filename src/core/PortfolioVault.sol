@@ -10,6 +10,7 @@ import {AggregatorV3Interface} from "@chainlink/src/v0.8/shared/interfaces/Aggre
 import {IGuardian} from "../interfaces/IGuardian.sol";
 import {IEventNotifier} from "../interfaces/IEventNotifier.sol";
 import {IChromaSwapRouter} from "../interfaces/ISwapRouter.sol";
+import {ITierYieldRouter} from "../interfaces/ITierYieldRouter.sol";
 
 /**
  * @title PortfolioVault
@@ -50,6 +51,18 @@ contract PortfolioVault is ReentrancyGuard {
     address public eventNotifier;
     address public swapRouter;
 
+    /// @notice Boost routing gateway for this tier (address(0) = Boost not available for this
+    ///         tier). Points at a {ITierYieldRouter}, not a strategy directly — assets without
+    ///         a configured strategy on that router simply stay in this vault, untouched.
+    address public yieldOptimizer;
+
+    /// @notice Minimum portfolio USD value (8 dec) required to enter Boost. Set by the factory
+    ///         at initialization — not owner-adjustable.
+    uint256 public minBoostAmountUsd;
+
+    /// @notice True while this vault's portfolio is deployed into {yieldOptimizer}.
+    bool public boosted;
+
     /// @notice Chainlink price feed per portfolio token.
     mapping(address => address) public priceFeeds;
 
@@ -81,6 +94,8 @@ contract PortfolioVault is ReentrancyGuard {
     event Withdraw(address indexed owner, address indexed outputToken, uint256 shares, uint256 usdValue);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event GuardianAddressUpdated(address indexed newGuardian);
+    event BoostEntered(address indexed owner, uint256[] amounts);
+    event BoostExited(address indexed owner, uint256[] amounts);
 
     // ─── Errors ──────────────────────────────────────────────────────────────
 
@@ -97,6 +112,12 @@ contract PortfolioVault is ReentrancyGuard {
     error StalePriceFeed(address token);
     error SwapRouterRequired();
     error OwnershipTransferBlocked();
+    error BoostNotAvailable();
+    error AlreadyBoosted();
+    error NotBoosted();
+    error BelowMinBoost();
+    error BoostApprovalRequired();
+    error VaultIsBoosted();
 
     // ─── Modifier ────────────────────────────────────────────────────────────
 
@@ -117,6 +138,9 @@ contract PortfolioVault is ReentrancyGuard {
      * @param guardianModule_ Shared guardian module (address(0) to disable).
      * @param recoveryModule_ Social recovery module (address(0) to disable).
      * @param swapRouter_     Swap router for deposit/withdraw token conversions.
+     * @param yieldOptimizer_ Boost routing gateway (ITierYieldRouter) for this tier
+     *                        (address(0) = Boost unavailable).
+     * @param minBoostAmountUsd_ Minimum portfolio USD value (8 dec) required to enter Boost.
      * @param tokens_         Portfolio token addresses.
      * @param weights_        Allocation weights in basis points (must sum to 10 000).
      * @param priceFeeds_     Chainlink feed per portfolio token (address(0) = no feed).
@@ -129,6 +153,8 @@ contract PortfolioVault is ReentrancyGuard {
         address guardianModule_,
         address recoveryModule_,
         address swapRouter_,
+        address yieldOptimizer_,
+        uint256 minBoostAmountUsd_,
         address[] calldata tokens_,
         uint256[] calldata weights_,
         address[] calldata priceFeeds_
@@ -139,15 +165,17 @@ contract PortfolioVault is ReentrancyGuard {
         if (tokens_.length != priceFeeds_.length) revert InvalidWeights();
         _assertWeightsSum(weights_);
 
-        _initialized    = true;
-        vaultOwner      = owner_;
-        riskTier        = tier_;
-        feeRecipient    = feeRecipient_;
-        eventNotifier   = eventNotifier_;
-        guardianModule  = guardianModule_;
-        recoveryModule  = recoveryModule_;
-        swapRouter      = swapRouter_;
-        lastFeeAccrual  = block.timestamp;
+        _initialized      = true;
+        vaultOwner        = owner_;
+        riskTier          = tier_;
+        feeRecipient      = feeRecipient_;
+        eventNotifier     = eventNotifier_;
+        guardianModule    = guardianModule_;
+        recoveryModule    = recoveryModule_;
+        swapRouter        = swapRouter_;
+        yieldOptimizer    = yieldOptimizer_;
+        minBoostAmountUsd = minBoostAmountUsd_;
+        lastFeeAccrual    = block.timestamp;
 
         string memory tierLabel = tier_ == 0 ? "Low" : tier_ == 1 ? "Medium" : "High";
         _name   = string.concat("Chroma ", tierLabel, " Risk Vault");
@@ -178,6 +206,7 @@ contract PortfolioVault is ReentrancyGuard {
         onlyOwner
         returns (uint256 shares)
     {
+        if (boosted) revert VaultIsBoosted();
         if (amount == 0) revert ZeroAmount();
         if (inputToken == address(0)) revert ZeroAddress();
         if (swapRouter == address(0)) revert SwapRouterRequired();
@@ -220,6 +249,7 @@ contract PortfolioVault is ReentrancyGuard {
         uint256 deadline,
         bytes calldata signature
     ) external nonReentrant onlyOwner returns (uint256 usdValue) {
+        if (boosted) revert VaultIsBoosted();
         if (shares == 0) revert ZeroAmount();
         if (shares > _balances[msg.sender]) revert ExceedsMax();
 
@@ -299,10 +329,96 @@ contract PortfolioVault is ReentrancyGuard {
         return vaultOwner;
     }
 
+    // ─── Boost ────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Deploys each portfolio asset that has a configured strategy on {yieldOptimizer}
+     *         into that strategy. Assets without one stay in this vault, untouched.
+     * @dev Only the vault owner may call. Requires guardian approval when a guardian is set —
+     *      Boost entry moves covered assets out of the vault's direct control, so it is gated
+     *      the same way a withdrawal is. Reverts if this tier has no Boost router, if already
+     *      boosted, or if the portfolio is below {minBoostAmountUsd}.
+     * @param deadline  Guardian signature expiry timestamp.
+     * @param signature EIP-712 guardian approval signature (empty bytes if no guardian set).
+     */
+    function enterBoost(uint256 deadline, bytes calldata signature) external onlyOwner nonReentrant {
+        if (yieldOptimizer == address(0)) revert BoostNotAvailable();
+        if (boosted) revert AlreadyBoosted();
+
+        uint256 currentValue = totalAssets();
+        if (currentValue < minBoostAmountUsd) revert BelowMinBoost();
+
+        if (guardianModule != address(0)) {
+            bool approved = IGuardian(guardianModule).validateBoostEntry(
+                address(this), msg.sender, deadline, signature
+            );
+            if (!approved) revert BoostApprovalRequired();
+        }
+
+        uint256[] memory amounts = new uint256[](portfolio.length);
+        for (uint256 i = 0; i < portfolio.length; i++) {
+            address token = portfolio[i].token;
+            address strategy = ITierYieldRouter(yieldOptimizer).strategyOf(token);
+            if (strategy == address(0)) continue; // stays in vault, untouched
+
+            uint256 bal = IERC20(token).balanceOf(address(this));
+            if (bal == 0) continue;
+
+            amounts[i] = bal;
+            IERC20(token).forceApprove(yieldOptimizer, bal);
+            ITierYieldRouter(yieldOptimizer).deposit(token, bal);
+        }
+
+        boosted = true;
+
+        emit BoostEntered(msg.sender, amounts);
+        if (eventNotifier != address(0)) {
+            IEventNotifier(eventNotifier).emitBoostEntered(msg.sender, address(this), riskTier, amounts);
+        }
+    }
+
+    /**
+     * @notice Withdraws every covered asset's full Boost position back into this vault.
+     *         Assets that were never moved (no configured strategy) are left as-is.
+     * @dev Only the vault owner may call. Ungated by guardian approval — unlike enterBoost,
+     *      exiting Boost returns funds to the vault's own custody, nothing leaves it.
+     */
+    function exitBoost() external onlyOwner nonReentrant {
+        if (!boosted) revert NotBoosted();
+
+        uint256[] memory amounts = new uint256[](portfolio.length);
+        for (uint256 i = 0; i < portfolio.length; i++) {
+            address token = portfolio[i].token;
+            address strategy = ITierYieldRouter(yieldOptimizer).strategyOf(token);
+            if (strategy == address(0)) continue; // was never moved, already in vault
+
+            amounts[i] = ITierYieldRouter(yieldOptimizer).withdrawAll(token);
+        }
+
+        boosted = false;
+
+        emit BoostExited(msg.sender, amounts);
+        if (eventNotifier != address(0)) {
+            IEventNotifier(eventNotifier).emitBoostExited(msg.sender, address(this), riskTier, amounts);
+        }
+    }
+
     // ─── Views ────────────────────────────────────────────────────────────────
 
     /// @notice Total portfolio value in USD with 8 decimals, via Chainlink price feeds.
     function totalAssets() public view returns (uint256) {
+        if (boosted) {
+            uint256 total;
+            for (uint256 i = 0; i < portfolio.length; i++) {
+                address token = portfolio[i].token;
+                address strategy = ITierYieldRouter(yieldOptimizer).strategyOf(token);
+                uint256 tokenAmount = strategy == address(0)
+                    ? IERC20(token).balanceOf(address(this))
+                    : ITierYieldRouter(yieldOptimizer).valueOf(address(this), token);
+                total += _valueInUsd(token, tokenAmount);
+            }
+            return total;
+        }
         return _calculatePortfolioValue();
     }
 
@@ -425,13 +541,21 @@ contract PortfolioVault is ReentrancyGuard {
             uint256 balance = IERC20(token).balanceOf(address(this));
             if (balance == 0) continue;
 
-            address feed = priceFeeds[token];
-            if (feed == address(0)) continue;
-
-            uint256 price    = getTokenPrice(token);
-            uint8   tokenDec = IERC20Metadata(token).decimals();
-            totalValue += (balance * price) / (10 ** tokenDec);
+            totalValue += _valueInUsd(token, balance);
         }
+    }
+
+    /// @dev Converts `amount` of `token` into its USD value (8 dec) via the token's Chainlink
+    ///      feed. Returns 0 if no feed is registered for `token`.
+    function _valueInUsd(address token, uint256 amount) internal view returns (uint256) {
+        if (amount == 0) return 0;
+
+        address feed = priceFeeds[token];
+        if (feed == address(0)) return 0;
+
+        uint256 price    = getTokenPrice(token);
+        uint8   tokenDec = IERC20Metadata(token).decimals();
+        return (amount * price) / (10 ** tokenDec);
     }
 
     function _assertWeightsSum(uint256[] calldata weights_) internal pure {
